@@ -1,0 +1,1037 @@
+import { Component, ChangeDetectionStrategy, signal, computed, WritableSignal, ChangeDetectorRef, effect, inject } from '@angular/core';
+import { CommonModule, NgOptimizedImage } from '@angular/common';
+import { FormsModule } from '@angular/forms'; // Asegúrate de importar FormsModule
+
+// --- INTERFACES DE DATOS ---
+
+/**
+ * Representa una finca (terreno)
+ */
+interface Farm {
+  id_finca: string;
+  nombre_finca: string;
+  tamano_tareas: number;
+  ubicacion: string;
+}
+
+/**
+ * Representa un registro de actividad agrícola
+ */
+interface Activity {
+  id_actividad: string;
+  id_finca: string;
+  fecha: string; // Formato YYYY-MM-DD para fácil ordenamiento
+  dia_semana: string;
+  hora_inicio: string;
+  hora_final: string;
+  trabajo_realizado: string;
+  productos: string;
+  coste: number;
+}
+
+/**
+ * Interfaz para el formulario de actividad,
+ * 'coste' es string para manejar comas (,) y puntos (.)
+ */
+interface ActivityForm {
+  id_actividad: string | null;
+  id_finca: string;
+  fecha: string; // Formato YYYY-MM-DD
+  hora_inicio: string;
+  hora_final: string;
+  trabajo_realizado: string;
+  productos: string;
+  coste: string; // Se maneja como string para aceptar comas
+}
+
+// --- INTERFACES PARA LA API DE GEMINI ---
+
+interface GeminiResponse {
+  candidates?: {
+    content: {
+      parts: { text: string }[];
+    };
+  }[];
+}
+
+interface GeminiPayload {
+  contents: {
+    parts: { text: string }[];
+  }[];
+  systemInstruction?: {
+    parts: { text: string }[];
+  };
+}
+
+
+@Component({
+  selector: 'app-root',
+  standalone: true,
+  imports: [CommonModule, FormsModule, NgOptimizedImage], // FormsModule es necesario para ngModel
+  template: `
+    <!-- Fondo con degradado suave -->
+    <div class="min-h-screen w-full bg-gradient-to-b from-gray-100 to-gray-200 text-gray-800 p-4 sm:p-8 font-sans">
+      
+      <!-- Contenedor principal -->
+      <div class="max-w-7xl mx-auto">
+        
+        <!-- Encabezado -->
+        <header class="flex flex-col sm:flex-row justify-between items-center mb-8 gap-4">
+          <div>
+            <h1 class="text-3xl font-bold text-gray-900">Sistema de Gestión Agrícola</h1>
+            <p class="text-gray-600">Control Operativo y Económico de Fincas de Arroz</p>
+          </div>
+          <div class="flex gap-2">
+            <button (click)="showFarmModal.set(true)" class="px-4 py-2 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition-all duration-300 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
+              <span>Nueva Finca</span>
+            </button>
+            <button (click)="openNewActivityModal()" [disabled]="!selectedFarmId()" class="px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-all duration-300 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+              <span>Registrar Actividad</span>
+            </button>
+          </div>
+        </header>
+
+        <!-- Selector de Finca -->
+        <div class="mb-8">
+          <label for="farm-select" class="block text-sm font-medium text-gray-700 mb-2">Seleccione una Finca:</label>
+          <select id="farm-select"
+            [ngModel]="selectedFarmId()"
+            (ngModelChange)="selectFarm($event)"
+            class="w-full max-w-md p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 bg-white">
+            <option [ngValue]="null" disabled>-- Ver todas las fincas --</option>
+            @for (farm of farms(); track farm.id_finca) {
+              <option [value]="farm.id_finca">{{ farm.nombre_finca }} ({{ farm.tamano_tareas }} tareas)</option>
+            }
+          </select>
+        </div>
+
+        <!-- Dashboard -->
+        @if (selectedFarm()) {
+          <section class="mb-8">
+            <div class="flex flex-col sm:flex-row justify-between items-center mb-4">
+              <h2 class="text-2xl font-semibold text-gray-800">Dashboard: {{ selectedFarm()?.nombre_finca }}</h2>
+              <button
+                (click)="analyzeCosts()"
+                [disabled]="analysisLoading()"
+                class="mt-4 sm:mt-0 px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 text-white rounded-lg shadow-md hover:from-purple-600 hover:to-indigo-700 transition-all duration-300 flex items-center gap-2 disabled:opacity-70 disabled:cursor-wait">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="M6 11.235S7.42 16.305 7.42 16.305c0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3"/></svg>
+                @if (analysisLoading()) {
+                  <span>Analizando...</span>
+                } @else {
+                  <span>✨ Analizar Gastos</span>
+                }
+              </button>
+            </div>
+
+            <!-- Métricas -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+              <!-- Tarjeta de Costo Total -->
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <div class="flex justify-between items-center mb-2">
+                  <h3 class="font-semibold text-gray-700">Costo Total Acumulado</h3>
+                  <div class="p-2 bg-red-100 rounded-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-red-600"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                  </div>
+                </div>
+                <div class="metric-value text-3xl font-bold text-gray-900">
+                  {{ formatCurrency(totalCostForSelectedFarm()) }}
+                </div>
+              </div>
+
+              <!-- Tarjeta de Costo por Tarea -->
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <div class="flex justify-between items-center mb-2">
+                  <h3 class="font-semibold text-gray-700">Costo Prom. por Tarea</h3>
+                  <div class="p-2 bg-blue-100 rounded-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-blue-600"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>
+                  </div>
+                </div>
+                <div class="metric-value text-3xl font-bold text-gray-900 flex items-baseline gap-2">
+                  <div>
+                    {{ formatCurrency(costPerTarea()) }}
+                  </div>
+                  <span classs="text-xs text-gray-500">/ {{ selectedFarm()?.tamano_tareas }} tareas</span>
+                </div>
+              </div>
+
+              <!-- Tarjeta de Total Actividades -->
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <div class="flex justify-between items-center mb-2">
+                  <h3 class="font-semibold text-gray-700">Actividades Registradas</h3>
+                  <div class="p-2 bg-green-100 rounded-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-green-600"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
+                  </div>
+                </div>
+                <div class="metric-value text-3xl font-bold text-gray-900">
+                  {{ activitiesForSelectedFarm().length }}
+                </div>
+              </div>
+            </div>
+
+            <!-- Análisis de IA -->
+            @if (analysisResult()) {
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50 mb-6">
+                <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="M6 11.235S7.42 16.305 7.42 16.305c0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3"/></svg>
+                  Análisis de Costos (IA)
+                </h3>
+                <div class="prose prose-sm max-w-none text-gray-800" [innerHTML]="analysisResult()"></div>
+              </div>
+            }
+
+            <!-- Gráficos (simulados con barras) -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <h3 class="font-semibold text-gray-700 mb-4">Gastos por Actividad (Top 5)</h3>
+                <div class="space-y-3">
+                  @for (item of topSpendingActivities(); track item.name) {
+                    <div class="w-full">
+                      <div class="flex justify-between text-sm font-medium mb-1">
+                        <span>{{ item.name }}</span>
+                        <span>{{ formatCurrency(item.total) }}</span>
+                      </div>
+                      <div class="w-full bg-gray-200 rounded-full h-2.5">
+                        <div class="bg-blue-600 h-2.5 rounded-full transition-all duration-500" [style.width.%]="item.percentage"></div>
+                      </div>
+                    </div>
+                  } @empty {
+                    <p class="text-gray-500 text-sm">No hay suficientes datos para mostrar el gráfico.</p>
+                  }
+                </div>
+              </div>
+              
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <h3 class="font-semibold text-gray-700 mb-4">Gastos Recientes (Últimos 7 Días)</h3>
+                <div class="h-40 w-full flex items-end justify-around gap-2 px-2">
+                  @for (day of weeklySpending(); track day.day) {
+                    <div class="flex-1 flex flex-col items-center justify-end h-full">
+                      <div class="w-full bg-green-500 rounded-t-md hover:bg-green-600 transition-all" [style.height.%]="day.percentage" [title]="formatCurrency(day.total)">
+                      </div>
+                      <span class="text-xs font-medium text-gray-600 mt-1">{{ day.day }}</span>
+                    </div>
+                  }
+                </div>
+              </div>
+            </div>
+
+            <!-- Lista de Actividades -->
+            <section>
+              <h2 class="text-2xl font-semibold text-gray-800 mb-4">Historial de Actividades</h2>
+              <div class=" overflow-x-auto rounded-lg shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <table class="min-w-full divide-y divide-gray-200">
+                  <thead class="bg-gray-50/50">
+                    <tr>
+                      <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Fecha</th>
+                      <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Actividad</th>
+                      <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Productos</th>
+                      <th class="px-6 py-3 text-right text-xs font-medium text-gray-600 uppercase tracking-wider">Costo</th>
+                      <th class="px-6 py-3 text-center text-xs font-medium text-gray-600 uppercase tracking-wider">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody class="bg-white/50 divide-y divide-gray-200/70">
+                    @for (act of activitiesForSelectedFarm(); track act.id_actividad) {
+                      <tr class="hover:bg-gray-50/50 transition-colors">
+                        <td class="px-6 py-4 whitespace-nowrap">
+                          <div class="text-sm font-medium text-gray-900">{{ formatDate(act.fecha) }}</div>
+                          <div class="text-sm text-gray-500">{{ act.dia_semana }}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                          <div class="text-sm font-medium text-gray-900">{{ act.trabajo_realizado }}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                          <div class="text-sm text-gray-600">{{ act.productos || 'N/A' }}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-right">
+                          <div class="text-sm font-medium text-red-600">{{ formatCurrency(act.coste) }}</div>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium">
+                          <!-- Botón Editar -->
+                          <button (click)="editActivity(act)" class="text-blue-600 hover:text-blue-900 transition-colors mr-3" title="Editar">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
+                          </button>
+                          <!-- Botón Eliminar -->
+                          <button (click)="deleteActivity(act.id_actividad)" class="text-red-600 hover:text-red-900 transition-colors" title="Eliminar">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                          </button>
+                        </td>
+                      </tr>
+                    } @empty {
+                      <tr>
+                        <td colspan="5" class="px-6 py-12 text-center text-gray-500">
+                          No hay actividades registradas para esta finca.
+                        </td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </section>
+        }
+
+        <!-- Estado inicial (sin finca seleccionada) -->
+        @if (!selectedFarmId()) {
+          <div class="text-center p-12 bg-white/30 backdrop-blur-md rounded-2xl shadow-lg border border-gray-200/50">
+            <h2 class="text-2xl font-semibold text-gray-700 mb-4">Bienvenido, Héctor</h2>
+            <p class="text-gray-600 max-w-md mx-auto">Seleccione una finca del menú superior para ver el dashboard y registrar actividades, o <button (click)="showFarmModal.set(true)" class="text-green-600 font-medium hover:underline">agregue una nueva finca</button> para comenzar.</p>
+            
+            <!-- Resumen de todas las fincas -->
+            @if (farms().length > 0) {
+              <div class="mt-8 pt-8 border-t border-gray-300">
+                <h3 class="text-xl font-semibold text-gray-700 mb-4">Resumen General</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 max-w-3xl mx-auto">
+                  <div class="p-4 bg-gray-100 rounded-lg shadow-inner">
+                    <div class="text-gray-600 text-sm">Total Fincas</div>
+                    <div class="text-2xl font-bold text-gray-900">{{ farms().length }}</div>
+                  </div>
+                  <div class="p-4 bg-gray-100 rounded-lg shadow-inner">
+                    <div class="text-gray-600 text-sm">Gasto Total (Todas)</div>
+                    <div class="text-2xl font-bold text-red-600">{{ formatCurrency(totalCostAllFarms()) }}</div>
+                  </div>
+                   <div class="p-4 bg-gray-100 rounded-lg shadow-inner">
+                    <div class="text-gray-600 text-sm">Total Tareas</div>
+                    <div class="text-2xl font-bold text-gray-900">{{ totalTareasAllFarms() }}</div>
+                  </div>
+                </div>
+              </div>
+            }
+          </div>
+        }
+      </div>
+
+      <!-- Footer con datos del creador -->
+      <footer class="mt-12 pt-6 border-t border-gray-300/50 text-center text-gray-500 text-sm">
+        <p>Sistema de Gestión Agrícola – Creado por: Héctor Ramos</p>
+        <p>Tel: 829-656-3436 | Correo: hectorramos1228@hotmail.com</p>
+      </footer>
+
+    </div>
+
+    <!-- Modal para Nueva Finca -->
+    @if (showFarmModal()) {
+      <div class="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-center items-center p-4 z-50" (click)="showFarmModal.set(false)">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 sm:p-8" (click)="$event.stopPropagation()">
+          <h3 class="text-2xl font-semibold mb-6 text-gray-800">Agregar Nueva Finca</h3>
+          <form (ngSubmit)="saveFarm()" class="space-y-4">
+            <div>
+              <label for="farm-name" class="block text-sm font-medium text-gray-700 mb-1">Nombre de la Finca:</label>
+              <input id="farm-name" type="text" [(ngModel)]="newFarmName" name="farm-name" required
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500">
+            </div>
+            <div>
+              <label for="farm-size" class="block text-sm font-medium text-gray-700 mb-1">Tamaño (en tareas):</label>
+              <input id="farm-size" type="number" [(ngModel)]="newFarmSize" name="farm-size" required
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500">
+            </div>
+            <div>
+              <label for="farm-location" class="block text-sm font-medium text-gray-700 mb-1">Ubicación (Opcional):</label>
+              <input id="farm-location" type="text" [(ngModel)]="newFarmLocation" name="farm-location"
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500">
+            </div>
+            <div class="flex justify-end gap-3 pt-4">
+              <button type="button" (click)="showFarmModal.set(false)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                Cancelar
+              </button>
+              <button type="submit" class="px-4 py-2 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition-colors">
+                Guardar Finca
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    }
+
+    <!-- Modal para Registrar/Editar Actividad -->
+    @if (showActivityModal()) {
+      <div class="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-center items-center p-4 z-50" (click)="showActivityModal.set(false)">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6 sm:p-8" (click)="$event.stopPropagation()">
+          <h3 class="text-2xl font-semibold mb-6 text-gray-800">
+            {{ activityForm().id_actividad ? 'Editar Actividad' : 'Registrar Nueva Actividad' }}
+          </h3>
+          <form (ngSubmit)="saveActivity()" class="space-y-4">
+            <!-- Fila Fecha y Día -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label for="act-date" class="block text-sm font-medium text-gray-700 mb-1">Fecha:</label>
+                <input id="act-date" type="date" [(ngModel)]="activityForm().fecha" name="act-date" required
+                  [max]="getTodayDate()"
+                  class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label for="act-day" class="block text-sm font-medium text-gray-700 mb-1">Día:</label>
+                <input id="act-day" type="text" [value]="getSpanishDayOfWeek(activityForm().fecha)" name="act-day" readonly
+                  class="w-full p-3 border border-gray-300 rounded-lg bg-gray-100 cursor-not-allowed">
+              </div>
+            </div>
+            <!-- Fila Horas -->
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label for="act-start-time" class="block text-sm font-medium text-gray-700 mb-1">Hora Inicio (Opcional):</label>
+                <input id="act-start-time" type="time" [(ngModel)]="activityForm().hora_inicio" name="act-start-time"
+                  class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
+              </div>
+              <div>
+                <label for="act-end-time" class="block text-sm font-medium text-gray-700 mb-1">Hora Final (Opcional):</label>
+                <input id="act-end-time" type="time" [(ngModel)]="activityForm().hora_final" name="act-end-time"
+                  class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
+              </div>
+            </div>
+            <!-- Fila Trabajo y Productos -->
+            <div>
+              <label for="act-work" class="block text-sm font-medium text-gray-700 mb-1">Trabajo Realizado:</label>
+              <input id="act-work" type="text" [(ngModel)]="activityForm().trabajo_realizado" name="act-work" required
+                placeholder="Ej: Fangueo, Nivelación, Siembra..."
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+              <label for="act-products" class="block text-sm font-medium text-gray-700 mb-1">Productos/Insumos (Opcional):</label>
+              <input id="act-products" type="text" [(ngModel)]="activityForm().productos" name="act-products"
+                placeholder="Ej: Herbicida X, Abono Y..."
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
+            </div>
+            <!-- Fila Coste -->
+            <div>
+              <label for="act-cost" class="block text-sm font-medium text-gray-700 mb-1">Coste (RD$):</label>
+              <input id="act-cost" type="text" inputmode="decimal" [(ngModel)]="activityForm().coste" name="act-cost" required
+                placeholder="Ej: 15,000 o 1500.50"
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
+            </div>
+            
+            <div class="flex justify-end gap-3 pt-4">
+              <button type="button" (click)="showActivityModal.set(false)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                Cancelar
+              </button>
+              <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-colors">
+                {{ activityForm().id_actividad ? 'Actualizar Actividad' : 'Guardar Actividad' }}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    }
+  `,
+  styles: [`
+    /* Estilos globales y de Tailwind (simulados por 'imports') */
+    :host {
+      font-family: 'Inter', sans-serif;
+    }
+
+    /* Estilo para las tarjetas de "vidrio esmerilado" */
+    .backdrop-blur-md {
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+
+    .bg-white\/30 {
+      background-color: rgba(255, 255, 255, 0.3);
+    }
+    
+    .bg-gray-50\/50 {
+      background-color: rgba(249, 250, 251, 0.5);
+    }
+    
+    .bg-white\/50 {
+      background-color: rgba(255, 255, 255, 0.5);
+    }
+
+    /* Animación sutil para las métricas */
+    .metric-value {
+      animation: pulse-subtle 1s ease-out;
+    }
+  
+    @keyframes pulse-subtle {
+      0% {
+        transform: scale(1);
+        opacity: 0.8;
+      }
+      50% {
+        transform: scale(1.05);
+        opacity: 1;
+      }
+      100% {
+        transform: scale(1);
+        opacity: 1;
+      }
+    }
+
+    /* Estilos para navegadores que no soportan backdrop-filter */
+    @supports not (backdrop-filter: blur(12px)) {
+      .backdrop-blur-md {
+        background-color: rgba(255, 255, 255, 0.85);
+      }
+    }
+  `],
+  changeDetection: ChangeDetectionStrategy.OnPush,
+})
+export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
+  
+  // --- SEÑALES DE ESTADO PRINCIPALES ---
+  
+  /** Lista de todas las fincas */
+  farms: WritableSignal<Farm[]> = signal([]);
+  /** Lista de todas las actividades de todas las fincas */
+  activities: WritableSignal<Activity[]> = signal([]);
+  /** ID de la finca actualmente seleccionada */
+  selectedFarmId: WritableSignal<string | null> = signal(null);
+  
+  /** Controla la visibilidad del modal de fincas */
+  showFarmModal = signal(false);
+  /** Controla la visibilidad del modal de actividades */
+  showActivityModal = signal(false);
+  
+  // --- SEÑALES PARA FORMULARIOS ---
+  
+  /** Nombre para la nueva finca */
+  newFarmName = signal('');
+  /** Tamaño para la nueva finca */
+  newFarmSize = signal<number | null>(null);
+  /** Ubicación para la nueva finca */
+  newFarmLocation = signal('');
+  
+  /**
+   * Estado del formulario de actividad.
+   * Usamos una señal que contiene un objeto para el formulario.
+   */
+  activityForm = signal<ActivityForm>(this.getEmptyActivityForm());
+  
+  // --- SEÑALES PARA IA (GEMINI) ---
+  
+  /** Almacena el resultado del análisis de IA */
+  analysisResult = signal<string | null>(null);
+  /** Indica si el análisis de IA está cargando */
+  analysisLoading = signal(false);
+
+  // --- DATOS DERIVADOS (COMPUTED) ---
+
+  /** Objeto de la finca seleccionada */
+  selectedFarm = computed(() => {
+    const id = this.selectedFarmId();
+    return this.farms().find(f => f.id_finca === id) || null;
+  });
+
+  /** Mapa con el costo total acumulado por finca (ID_Finca -> Total) */
+  farmTotals = computed(() => {
+    const totals = new Map<string, number>();
+    for (const activity of this.activities()) {
+      const currentTotal = totals.get(activity.id_finca) || 0;
+      totals.set(activity.id_finca, currentTotal + activity.coste);
+    }
+    return totals;
+  });
+
+  /** Costo total para la finca seleccionada */
+  totalCostForSelectedFarm = computed(() => {
+    const id = this.selectedFarmId();
+    if (!id) return 0;
+    return this.farmTotals().get(id) || 0;
+  });
+  
+  /** Costo total de todas las fincas combinadas */
+  totalCostAllFarms = computed(() => {
+    return this.activities().reduce((acc, act) => acc + act.coste, 0);
+  });
+  
+  /** Tareas totales de todas las fincas */
+  totalTareasAllFarms = computed(() => {
+    return this.farms().reduce((acc, farm) => acc + (farm.tamano_tareas || 0), 0);
+  });
+
+  /** Lista de actividades filtrada para la finca seleccionada y ordenada */
+  activitiesForSelectedFarm = computed(() => {
+    const id = this.selectedFarmId();
+    return this.activities()
+      .filter(a => a.id_finca === id)
+      .sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
+  });
+
+  /** Costo promedio por tarea para la finca seleccionada */
+  costPerTarea = computed(() => {
+    const farm = this.selectedFarm();
+    const totalCost = this.totalCostForSelectedFarm();
+    if (!farm || !farm.tamano_tareas || farm.tamano_tareas === 0) {
+      return 0;
+    }
+    return totalCost / farm.tamano_tareas;
+  });
+  
+  /** Datos para el gráfico de gastos por actividad (Top 5) */
+  topSpendingActivities = computed(() => {
+    const spendingMap = new Map<string, number>();
+    for (const act of this.activitiesForSelectedFarm()) {
+      const name = act.trabajo_realizado.trim() || 'Sin especificar';
+      const total = (spendingMap.get(name) || 0) + act.coste;
+      spendingMap.set(name, total);
+    }
+    
+    const sorted = Array.from(spendingMap.entries())
+      .map(([name, total]) => ({ name, total }))
+      .sort((a, b) => b.total - a.total);
+      
+    const top5 = sorted.slice(0, 5);
+    const maxTotal = top5[0]?.total || 1; // Evitar división por cero
+    
+    return top5.map(item => ({
+      ...item,
+      percentage: (item.total / maxTotal) * 100
+    }));
+  });
+
+  /** Datos para el gráfico de gastos semanales (últimos 7 días) */
+  weeklySpending = computed(() => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    const weeklyMap = new Map<string, number>();
+    const days = [];
+    const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+    
+    // Inicializar los últimos 7 días
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
+      const dateString = date.toISOString().split('T')[0]; // YYYY-MM-DD
+      const dayName = dayNames[date.getDay()];
+      
+      weeklyMap.set(dateString, 0);
+      days.push({ day: dayName, dateString: dateString });
+    }
+    
+    // Sumar costos
+    for (const act of this.activitiesForSelectedFarm()) {
+      if (weeklyMap.has(act.fecha)) {
+        const total = weeklyMap.get(act.fecha)! + act.coste;
+        weeklyMap.set(act.fecha, total);
+      }
+    }
+    
+    let maxTotal = 0;
+    const finalData = days.map(day => {
+      const total = weeklyMap.get(day.dateString)!;
+      if (total > maxTotal) maxTotal = total;
+      return { day: day.day, total };
+    });
+    
+    if (maxTotal === 0) maxTotal = 1; // Evitar división por cero
+    
+    return finalData.map(day => ({
+      ...day,
+      percentage: (day.total / maxTotal) * 100
+    }));
+  });
+
+  // --- CONSTRUCTOR Y CICLO DE VIDA ---
+  
+  private cdr = inject(ChangeDetectorRef); // <-- Inyectado aquí
+
+  constructor() { // <-- Se quita del constructor
+    this.loadFromLocalStorage();
+    
+    // Efecto para guardar en localStorage cada vez que cambien fincas o actividades
+    effect(() => {
+      const farmsData = this.farms();
+      const activitiesData = this.activities();
+      console.log('Guardando en localStorage...');
+      localStorage.setItem('agri_farms', JSON.stringify(farmsData));
+      localStorage.setItem('agri_activities', JSON.stringify(activitiesData));
+    });
+
+    // Efecto para limpiar el análisis de IA cuando cambia la finca
+    effect(() => {
+      this.selectedFarmId(); // Registrar dependencia
+      this.analysisResult.set(null);
+      this.analysisLoading.set(false);
+    });
+  }
+
+  // --- LÓGICA DE ALMACENAMIENTO (LocalStorage) ---
+  
+  loadFromLocalStorage() {
+    try {
+      const farmsData = localStorage.getItem('agri_farms');
+      const activitiesData = localStorage.getItem('agri_activities');
+      
+      if (farmsData) {
+        this.farms.set(JSON.parse(farmsData));
+      }
+      if (activitiesData) {
+        this.activities.set(JSON.parse(activitiesData));
+      }
+
+      // Si hay fincas, selecciona la primera por defecto
+      if (this.farms().length > 0 && !this.selectedFarmId()) {
+        this.selectedFarmId.set(this.farms()[0].id_finca);
+      }
+      
+    } catch (error) {
+      console.error('Error al cargar datos de localStorage:', error);
+    }
+  }
+
+  // --- LÓGICA DE NEGOCIO (Fincas y Actividades) ---
+  
+  selectFarm(id: string | null) {
+    if (id) {
+      this.selectedFarmId.set(id);
+    }
+  }
+
+  saveFarm() {
+    const name = this.newFarmName().trim();
+    const size = this.newFarmSize();
+
+    if (!name || !size || size <= 0) {
+      console.error('Datos de finca inválidos');
+      // Aquí podrías mostrar un error al usuario
+      return;
+    }
+
+    const newFarm: Farm = {
+      id_finca: crypto.randomUUID(),
+      nombre_finca: name,
+      tamano_tareas: size,
+      ubicacion: this.newFarmLocation().trim()
+    };
+
+    this.farms.update(currentFarms => [...currentFarms, newFarm]);
+    
+    // Seleccionar la finca recién creada
+    this.selectedFarmId.set(newFarm.id_finca);
+    
+    // Limpiar formulario y cerrar modal
+    this.newFarmName.set('');
+    this.newFarmSize.set(null);
+    this.newFarmLocation.set('');
+    this.showFarmModal.set(false);
+  }
+
+  deleteFarm(id: string) {
+    // Implementar lógica de confirmación si se desea
+    
+    // Eliminar finca
+    this.farms.update(farms => farms.filter(f => f.id_finca !== id));
+    
+    // Eliminar actividades asociadas
+    this.activities.update(acts => acts.filter(a => a.id_finca !== id));
+
+    // Si la finca eliminada era la seleccionada, deseleccionar
+    if (this.selectedFarmId() === id) {
+      this.selectedFarmId.set(null);
+      // Opcional: seleccionar la primera finca si existe
+      if (this.farms().length > 0) {
+        this.selectedFarmId.set(this.farms()[0].id_finca);
+      }
+    }
+  }
+
+  // --- LÓGICA DE ACTIVIDADES ---
+
+  /** Devuelve un objeto de formulario de actividad vacío */
+  getEmptyActivityForm(): ActivityForm {
+    return {
+      id_actividad: null,
+      id_finca: this.selectedFarmId() || '',
+      fecha: this.getTodayDate(),
+      hora_inicio: '',
+      hora_final: '',
+      trabajo_realizado: '',
+      productos: '',
+      coste: '' // Inicia como string vacío
+    };
+  }
+
+  /** Abre el modal para registrar una NUEVA actividad */
+  openNewActivityModal() {
+    if (!this.selectedFarmId()) return; // No abrir si no hay finca
+    
+    this.activityForm.set({
+      id_actividad: null,
+      id_finca: this.selectedFarmId()!,
+      fecha: this.getTodayDate(),
+      hora_inicio: '',
+      hora_final: '',
+      trabajo_realizado: '',
+      productos: '',
+      coste: ''
+    });
+    this.showActivityModal.set(true);
+  }
+
+  /** Abre el modal para EDITAR una actividad existente */
+  editActivity(activity: Activity) {
+    this.activityForm.set({
+      id_actividad: activity.id_actividad,
+      id_finca: activity.id_finca,
+      fecha: activity.fecha, // El formato ya es YYYY-MM-DD
+      hora_inicio: activity.hora_inicio,
+      hora_final: activity.hora_final,
+      trabajo_realizado: activity.trabajo_realizado,
+      productos: activity.productos,
+      // Convertir el número de coste a string para el formulario
+      // Usamos 'es-DO' para que ponga la coma decimal si aplica
+      coste: activity.coste.toLocaleString('es-DO', { useGrouping: false, minimumFractionDigits: 0 }) 
+    });
+    this.showActivityModal.set(true);
+  }
+
+  /** Guarda (o actualiza) una actividad */
+  saveActivity() {
+    const form = this.activityForm();
+    const costValue = this.parseCurrency(form.coste);
+
+    // --- Validación ---
+    if (!form.fecha) {
+      console.error("Formulario inválido: La 'Fecha' es obligatoria.");
+      return;
+    }
+    if (!form.trabajo_realizado) {
+      console.error("Formulario inválido: El 'Trabajo Realizado' es obligatorio.");
+      return;
+    }
+    if (isNaN(costValue)) {
+      console.error("Formulario inválido: El 'Coste' no es un número válido.");
+      return;
+    }
+     if (costValue < 0) {
+      console.error("Formulario inválido: El 'Coste' no puede ser negativo.");
+      return;
+    }
+    
+    const activityData: Activity = {
+      id_actividad: form.id_actividad || crypto.randomUUID(),
+      id_finca: form.id_finca,
+      fecha: form.fecha,
+      dia_semana: this.getSpanishDayOfWeek(form.fecha),
+      hora_inicio: form.hora_inicio,
+      hora_final: form.hora_final,
+      trabajo_realizado: form.trabajo_realizado.trim(),
+      productos: form.productos.trim(),
+      coste: costValue // Usar el valor numérico parseado
+    };
+
+    if (form.id_actividad) {
+      // Es una actualización
+      this.activities.update(acts => 
+        acts.map(a => a.id_actividad === form.id_actividad ? activityData : a)
+      );
+    } else {
+      // Es una nueva actividad
+      this.activities.update(acts => [...acts, activityData]);
+    }
+    
+    this.showActivityModal.set(false);
+    this.activityForm.set(this.getEmptyActivityForm()); // Limpiar formulario
+    
+    // Forzar redetección para la animación
+    this.cdr.detectChanges();
+  }
+
+  deleteActivity(id: string) {
+    // Implementar lógica de confirmación si se desea
+    this.activities.update(acts => acts.filter(a => a.id_actividad !== id));
+    // Forzar redetección para la animación
+    this.cdr.detectChanges();
+  }
+
+  // --- LÓGICA DE ANÁLISIS CON IA (GEMINI) ---
+
+  /**
+   * Prepara y envía la solicitud a la API de Gemini para analizar costos.
+   */
+  async analyzeCosts() {
+    const farm = this.selectedFarm();
+    const activities = this.activitiesForSelectedFarm();
+
+    if (!farm || activities.length === 0) {
+      this.analysisResult.set("<p>No hay suficientes datos de actividades para analizar.</p>");
+      return;
+    }
+
+    this.analysisLoading.set(true);
+    this.analysisResult.set(null);
+
+    // Preparar el prompt
+    const systemPrompt = `Eres un asistente experto en agronomía y finanzas agrícolas, especializado en cultivos de arroz en la República Dominicana. Analiza los siguientes datos de costos de una finca y provee un resumen ejecutivo breve (máximo 3 párrafos). Tu respuesta debe estar en HTML (usa <p>, <strong>, <ul>, <li>).
+
+Tu análisis debe incluir:
+1.  Identificar la actividad (trabajo_realizado) con el costo acumulado más alto.
+2.  Mencionar el costo total de la finca.
+3.  Dar una recomendación clave o un punto de atención basado en los datos (ej. "Vigilar el alto costo de fertilizantes" o "El costo de chapeo parece elevado para esta etapa").
+4.  Mantén un tono profesional y útil.`;
+
+    const dataPrompt = `
+Datos de la Finca:
+- Nombre: ${farm.nombre_finca}
+- Tamaño: ${farm.tamano_tareas} tareas
+- Costo Total Acumulado: ${this.formatCurrency(this.totalCostForSelectedFarm())}
+
+Lista de Actividades y Costos:
+${activities.map(a => `- Fecha: ${this.formatDate(a.fecha)}, Actividad: ${a.trabajo_realizado}, Costo: ${this.formatCurrency(a.coste)}`).join('\n')}
+
+Por favor, genera el análisis experto.`;
+
+    try {
+      const result = await this.callGemini(dataPrompt, systemPrompt);
+      this.analysisResult.set(result);
+    } catch (error) {
+      console.error('Error al llamar a la API de Gemini:', error);
+      this.analysisResult.set('<p><strong>Error:</strong> No se pudo completar el análisis. Inténtelo más tarde.</p>');
+    } finally {
+      this.analysisLoading.set(false);
+    }
+  }
+
+  /**
+   * Llama a la API de Gemini (simulado o real)
+   * NOTA: Esta función usa la API 'generateContent' de Gemini.
+   */
+  async callGemini(prompt: string, systemPrompt: string): Promise<string> {
+    const apiKey = ""; // La API Key se gestiona automáticamente en este entorno
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+    const payload: GeminiPayload = {
+      contents: [{
+        parts: [{ text: prompt }]
+      }],
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      },
+    };
+
+    // Función de reintento con backoff exponencial
+    const fetchWithRetry = async (retries = 3, delay = 1000): Promise<Response> => {
+      try {
+        const response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        
+        if (response.status === 429 || response.status >= 500) { // Too Many Requests o Server Error
+          if (retries > 0) {
+            await new Promise(res => setTimeout(res, delay));
+            return fetchWithRetry(retries - 1, delay * 2);
+          }
+        }
+        return response;
+      } catch (error) {
+        if (retries > 0) {
+          await new Promise(res => setTimeout(res, delay));
+          return fetchWithRetry(retries - 1, delay * 2);
+        }
+        throw error;
+      }
+    };
+
+    const response = await fetchWithRetry();
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`Error en la API de Gemini: ${response.status} ${response.statusText}. Cuerpo: ${errorBody}`);
+    }
+
+    const result = await response.json() as GeminiResponse;
+    
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!text) {
+      throw new Error('Respuesta de Gemini inválida o vacía.');
+    }
+    
+    return text;
+  }
+
+  // --- FUNCIONES UTILITARIAS (Helpers) ---
+
+  /** Formatea un número como moneda RD$ (1,250.75) */
+  formatCurrency(value: number): string {
+    // Usamos 'en-US' para forzar el formato 1,250.75
+    // y 'style: 'decimal'' para que no ponga el símbolo 'DOP'.
+    // Luego, añadimos 'RD$' manualmente.
+    const numberPart = new Intl.NumberFormat('en-US', {
+      style: 'decimal', // 'decimal' en lugar de 'currency'
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    }).format(value);
+
+    // Prependemos el símbolo de moneda de RD
+    return `RD$ ${numberPart}`;
+  }
+
+  /** Formatea una fecha YYYY-MM-DD a DD/MM/YYYY */
+  formatDate(dateString: string): string {
+    if (!dateString || !dateString.includes('-')) return dateString;
+    const [year, month, day] = dateString.split('-');
+    return `${day}/${month}/${year}`;
+  }
+
+  /**
+   * Convierte un string de moneda (con comas o puntos) a un número flotante.
+   * Acepta formatos como: "1,500.25", "1.500,25", "15,000", "15,50", "15.000", "15.50".
+   */
+  parseCurrency(value: string | null): number {
+    if (value === null || typeof value !== 'string' || value.trim() === '') {
+      return NaN; // Devuelve NaN para validación
+    }
+
+    let cleanValue = value.trim();
+    
+    const lastComma = cleanValue.lastIndexOf(',');
+    const lastPeriod = cleanValue.lastIndexOf('.');
+
+    // Caso 1: "1.500,25" (Punto-miles, Coma-decimal)
+    if (lastPeriod !== -1 && lastComma !== -1 && lastComma > lastPeriod) {
+      cleanValue = cleanValue.replace(/\./g, ''); // Quitar puntos de miles
+      cleanValue = cleanValue.replace(',', '.'); // Reemplazar coma decimal
+    } 
+    // Caso 2: "1,500.25" (Coma-miles, Punto-decimal)
+    else if (lastPeriod !== -1 && lastComma !== -1 && lastPeriod > lastComma) {
+      cleanValue = cleanValue.replace(/,/g, ''); // Quitar comas de miles
+    }
+    // Caso 3: "15,000" (Solo comas)
+    else if (lastComma !== -1 && lastPeriod === -1) {
+      const afterComma = cleanValue.substring(lastComma + 1);
+      // Heurística: si hay 3 dígitos después, es de miles. Si no, es decimal.
+      if (afterComma.length === 3 && cleanValue.length > 3) { // "15,000"
+        cleanValue = cleanValue.replace(/,/g, ''); // Es separador de miles
+      } else { // "15,50" o "15,0"
+        cleanValue = cleanValue.replace(',', '.'); // Es decimal
+      }
+    }
+    // Caso 4: "15.000" (Solo puntos)
+    else if (lastPeriod !== -1 && lastComma === -1) {
+       const afterPeriod = cleanValue.substring(lastPeriod + 1);
+       const periodCount = (cleanValue.match(/\./g) || []).length;
+       
+       // Si hay más de un punto ("1.500.000")
+       // o si hay un punto y 3 dígitos después ("15.000")
+       if (periodCount > 1 || (periodCount === 1 && afterPeriod.length === 3 && cleanValue.length > 3)) { 
+         cleanValue = cleanValue.replace(/\./g, ''); // Tratar como separador de miles
+       }
+       // Si es "15.50" (periodCount === 1, afterPeriod.length === 2), no se hace nada.
+    }
+    // Caso 5: "1500" (Sin separadores) - no se hace nada.
+    
+    // Quitar cualquier cosa que no sea número o el punto decimal final
+    cleanValue = cleanValue.replace(/[^0-9.]/g, '');
+
+    const parsed = parseFloat(cleanValue);
+    // Devuelve NaN si falla el parseo
+    return parsed; 
+  }
+
+
+  /** Obtiene el día de la semana en español a partir de una fecha YYYY-MM-DD */
+  getSpanishDayOfWeek(dateString: string): string {
+    if (!dateString) return '';
+    const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+    // Ajuste: El constructor de Date necesita 'T00:00:00' para evitar problemas de zona horaria
+    const date = new Date(`${dateString}T00:00:00`); 
+    return days[date.getDay()];
+  }
+  
+  /** Obtiene la fecha de hoy en formato YYYY-MM-DD */
+  getTodayDate(): string {
+    return new Date().toISOString().split('T')[0];
+  }
+}
