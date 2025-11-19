@@ -1,6 +1,7 @@
 import { Component, ChangeDetectionStrategy, signal, computed, WritableSignal, ChangeDetectorRef, effect, inject } from '@angular/core';
 import { CommonModule, NgOptimizedImage } from '@angular/common';
-import { FormsModule } from '@angular/forms'; // Asegúrate de importar FormsModule
+import { FormsModule } from '@angular/forms'; 
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser'; // Importar DomSanitizer
 
 // --- INTERFACES DE DATOS ---
 
@@ -12,6 +13,7 @@ interface Farm {
   nombre_finca: string;
   tamano_tareas: number;
   ubicacion: string;
+  tipo_cultivo: string; 
 }
 
 /**
@@ -30,8 +32,7 @@ interface Activity {
 }
 
 /**
- * Interfaz para el formulario de actividad,
- * 'coste' es string para manejar comas (,) y puntos (.)
+ * Interfaz para el formulario de actividad.
  */
 interface ActivityForm {
   id_actividad: string | null;
@@ -42,6 +43,29 @@ interface ActivityForm {
   trabajo_realizado: string;
   productos: string;
   coste: string; // Se maneja como string para aceptar comas
+}
+
+/**
+ * Interfaz para la métrica de resumen de actividades.
+ */
+interface ActivitySummary {
+  count: number;
+  totalCost: number;
+}
+
+/**
+ * Reporte de Cierre de Ciclo de Cultivo
+ */
+interface CropReport {
+  farmName: string;
+  cropType: string;
+  startDate: string;
+  endDate: string;
+  totalRevenue: number;
+  totalExpenses: number;
+  netProfit: number;
+  durationDays: number;
+  reportDate: string;
 }
 
 // --- INTERFACES PARA LA API DE GEMINI ---
@@ -58,6 +82,7 @@ interface GeminiPayload {
   contents: {
     parts: { text: string }[];
   }[];
+  tools?: any[];
   systemInstruction?: {
     parts: { text: string }[];
   };
@@ -79,9 +104,9 @@ interface GeminiPayload {
         <header class="flex flex-col sm:flex-row justify-between items-center mb-8 gap-4">
           <div>
             <h1 class="text-3xl font-bold text-gray-900">Sistema de Gestión Agrícola</h1>
-            <p class="text-gray-600">Control Operativo y Económico de Fincas de Arroz</p>
+            <p class="text-gray-600">Control Operativo y Económico de Fincas</p>
           </div>
-          <div class="flex gap-2">
+          <div class="flex gap-2 flex-wrap justify-center sm:justify-start">
             <button (click)="showFarmModal.set(true)" class="px-4 py-2 bg-green-600 text-white rounded-lg shadow-md hover:bg-green-700 transition-all duration-300 flex items-center gap-2">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="12" y1="8" x2="12" y2="16"></line><line x1="8" y1="12" x2="16" y2="12"></line></svg>
               <span>Nueva Finca</span>
@@ -89,6 +114,10 @@ interface GeminiPayload {
             <button (click)="openNewActivityModal()" [disabled]="!selectedFarmId()" class="px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition-all duration-300 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
               <span>Registrar Actividad</span>
+            </button>
+            <button (click)="showImportModal.set(true)" class="px-4 py-2 bg-gray-600 text-white rounded-lg shadow-md hover:bg-gray-700 transition-all duration-300 flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line></svg>
+              <span>Importar Datos CSV</span>
             </button>
           </div>
         </header>
@@ -100,9 +129,9 @@ interface GeminiPayload {
             [ngModel]="selectedFarmId()"
             (ngModelChange)="selectFarm($event)"
             class="w-full max-w-md p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500 focus:border-green-500 bg-white">
-            <option [ngValue]="null" disabled>-- Ver todas las fincas --</option>
+            <option [ngValue]="null" disabled>-- Seleccione una finca --</option>
             @for (farm of farms(); track farm.id_finca) {
-              <option [value]="farm.id_finca">{{ farm.nombre_finca }} ({{ farm.tamano_tareas }} tareas)</option>
+              <option [value]="farm.id_finca">{{ farm.nombre_finca }} ({{ farm.tipo_cultivo }})</option>
             }
           </select>
         </div>
@@ -110,22 +139,108 @@ interface GeminiPayload {
         <!-- Dashboard -->
         @if (selectedFarm()) {
           <section class="mb-8">
-            <div class="flex flex-col sm:flex-row justify-between items-center mb-4">
+            <div class="flex flex-col sm:flex-row justify-between items-center mb-4 gap-3">
               <h2 class="text-2xl font-semibold text-gray-800">Dashboard: {{ selectedFarm()?.nombre_finca }}</h2>
-              <button
-                (click)="analyzeCosts()"
-                [disabled]="analysisLoading()"
-                class="mt-4 sm:mt-0 px-4 py-2 bg-gradient-to-r from-purple-500 to-indigo-600 text-white rounded-lg shadow-md hover:from-purple-600 hover:to-indigo-700 transition-all duration-300 flex items-center gap-2 disabled:opacity-70 disabled:cursor-wait">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="M6 11.235S7.42 16.305 7.42 16.305c0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3"/></svg>
-                @if (analysisLoading()) {
-                  <span>Analizando...</span>
-                } @else {
-                  <span>✨ Analizar Gastos</span>
-                }
-              </button>
+              
+              <!-- Botones de Acción -->
+              <div class="flex flex-wrap justify-center sm:justify-end gap-3 w-full sm:w-auto">
+                <button 
+                  (click)="exportFarmData()"
+                  [disabled]="activitiesForSelectedFarm().length === 0"
+                  class="px-4 py-2 bg-teal-500 text-white rounded-lg shadow-md hover:bg-teal-600 transition-all duration-300 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                  <span>Exportar a CSV</span>
+                </button>
+
+                <button 
+                  (click)="openEndCropModal()"
+                  [disabled]="activitiesForSelectedFarm().length === 0"
+                  class="px-4 py-2 bg-red-500 text-white rounded-lg shadow-md hover:bg-red-600 transition-all duration-300 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12H3"/><path d="M12 21V3"/></svg>
+                  <span>Fin del Ciclo de Cultivo</span>
+                </button>
+              </div>
             </div>
 
-            <!-- Métricas -->
+            <!-- REPORTE DE CIERRE DE CICLO -->
+            @if (cropReport()) {
+              <div class="p-6 rounded-2xl shadow-xl bg-green-50/70 backdrop-blur-md border border-green-200/50 mb-6">
+                <h3 class="text-2xl font-bold text-green-800 mb-4 flex items-center gap-3">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                  Informe Final de Cultivo
+                </h3>
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 mb-4 text-sm font-medium">
+                    <div class="p-3 bg-white rounded-lg border border-gray-100">
+                        <div class="text-gray-500">Cultivo</div>
+                        <div class="text-gray-900">{{ cropReport()!.cropType }}</div>
+                    </div>
+                    <div class="p-3 bg-white rounded-lg border border-gray-100">
+                        <div class="text-gray-500">Duración del Ciclo</div>
+                        <div class="text-gray-900">{{ cropReport()!.durationDays }} días</div>
+                    </div>
+                    <div class="p-3 bg-white rounded-lg border border-gray-100">
+                        <div class="text-gray-500">Fecha de Inicio</div>
+                        <div class="text-gray-900">{{ formatDate(cropReport()!.startDate) }}</div>
+                    </div>
+                    <div class="p-3 bg-white rounded-lg border border-gray-100">
+                        <div class="text-gray-500">Fecha de Fin</div>
+                        <div class="text-gray-900">{{ formatDate(cropReport()!.endDate) }}</div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 border-t pt-4">
+                  <!-- Ingreso Total (sin restar) -->
+                  <div class="p-4 rounded-xl bg-blue-100 shadow-md">
+                    <div class="text-lg font-semibold text-blue-800">Total Ingresos</div>
+                    <div class="text-3xl font-bold text-blue-900">{{ formatCurrency(cropReport()!.totalRevenue) }}</div>
+                  </div>
+                  <!-- Gastos Totales -->
+                  <div class="p-4 rounded-xl bg-red-100 shadow-md">
+                    <div class="text-lg font-semibold text-red-800">Total Gastos (Costes)</div>
+                    <div class="text-3xl font-bold text-red-900">{{ formatCurrency(cropReport()!.totalExpenses) }}</div>
+                  </div>
+                  <!-- Beneficio Neto (Ingreso - Gasto) -->
+                  <div class="p-4 rounded-xl shadow-lg"
+                       [ngClass]="cropReport()!.netProfit >= 0 ? 'bg-green-100' : 'bg-red-200'">
+                    <div class="text-lg font-semibold"
+                         [ngClass]="cropReport()!.netProfit >= 0 ? 'text-green-800' : 'text-red-800'">Beneficio Neto</div>
+                    <div class="text-3xl font-bold"
+                         [ngClass]="cropReport()!.netProfit >= 0 ? 'text-green-900' : 'text-red-900'">
+                      {{ formatCurrency(cropReport()!.netProfit) }}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            }
+
+
+            <!-- Análisis de Cultivo e Insumos (IA) -->
+            <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50 mb-6">
+              <h3 class="font-semibold text-gray-700 mb-3 flex items-center justify-between">
+                <span>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block text-yellow-600 mr-2"><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3"/></svg>
+                  Tips para {{ selectedFarm()?.tipo_cultivo }}
+                </span>
+                <button
+                  (click)="generateCropTips()"
+                  [disabled]="cropTipsLoading()"
+                  class="px-3 py-1 text-sm bg-yellow-500 text-white rounded-full shadow-md hover:bg-yellow-600 transition-all duration-300 disabled:opacity-70 disabled:cursor-wait">
+                  @if (cropTipsLoading()) {
+                    <span>Cargando Tips...</span>
+                  } @else {
+                    <span>Generar Tips</span>
+                  }
+                </button>
+              </h3>
+              @if (safeCropTipsResult()) {
+                <!-- Contenedor con clase para estilizar el contenido Markdown -->
+                <div class="prose max-w-none text-gray-800 border-t pt-3 mt-3 crop-tips-content" [innerHTML]="safeCropTipsResult()"></div>
+              } @else {
+                <p class="text-sm text-gray-500 border-t pt-3 mt-3">Haz clic en "Generar Tips" para recibir recomendaciones personalizadas sobre riego, fertilización y plagas para tu cultivo de {{ selectedFarm()?.tipo_cultivo }}.</p>
+              }
+            </div>
+
+            <!-- Métricas Principales (Costo Total, Costo/Tarea, Total Actividades) -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
               <!-- Tarjeta de Costo Total -->
               <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
@@ -170,14 +285,66 @@ interface GeminiPayload {
               </div>
             </div>
 
-            <!-- Análisis de IA -->
-            @if (analysisResult()) {
+            <!-- Nuevas Métricas de Conteo y Costo por Actividad (Riego y Abonado) -->
+            <h3 class="text-xl font-semibold text-gray-800 mb-4 mt-8">Resumen de Actividades Clave</h3>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+              
+              <!-- Tarjeta de Riego -->
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <div class="flex justify-between items-center mb-2">
+                  <h3 class="font-semibold text-gray-700">Veces Regado</h3>
+                  <div class="p-2 bg-blue-50 rounded-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-blue-500"><path d="M12 2v20M17 5H7M17 19H7M5 12h14M8 12h8"></path><path d="M12 2c-3.3 0-6 2.7-6 6v8c0 3.3 2.7 6 6 6s6-2.7 6-6V8c0-3.3-2.7-6-6-6z"/></svg>
+                  </div>
+                </div>
+                <div class="text-3xl font-bold text-gray-900">
+                  {{ activitySummary()['riego']?.count || 0 }}
+                </div>
+                <p class="text-sm text-gray-600 mt-2">Costo Total: <span class="font-medium text-red-600">{{ formatCurrency(activitySummary()['riego']?.totalCost || 0) }}</span></p>
+              </div>
+
+              <!-- Tarjeta de Abonado -->
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50">
+                <div class="flex justify-between items-center mb-2">
+                  <h3 class="font-semibold text-gray-700">Veces Abonado</h3>
+                  <div class="p-2 bg-yellow-50 rounded-full">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-yellow-600"><path d="M11 15H9c-2 0-3-1-3-3V7c0-2 1-3 3-3h2c2 0 3 1 3 3v5c0 2-1 3-3 3z"/><path d="M11 20H9c-2 0-3-1-3-3v-5c0-2 1-3 3-3h2c2 0 3 1 3 3v5c0 2-1 3-3 3z"/></svg>
+                  </div>
+                </div>
+                <div class="text-3xl font-bold text-gray-900">
+                  {{ activitySummary()['abonado']?.count || 0 }}
+                </div>
+                <p class="text-sm text-gray-600 mt-2">Costo Total: <span class="font-medium text-red-600">{{ formatCurrency(activitySummary()['abonado']?.totalCost || 0) }}</span></p>
+              </div>
+
+            </div>
+            <!-- Fin Nuevas Métricas -->
+
+            <!-- Análisis de IA (Costo) -->
+            @if (safeAnalysisResult()) {
               <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50 mb-6">
-                <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="M6 11.235S7.42 16.305 7.42 16.305c0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3"/></svg>
-                  Análisis de Costos (IA)
+                <h3 class="font-semibold text-gray-700 mb-3 flex items-center justify-between">
+                  <span>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block text-purple-600 mr-2"><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3Z"/><path d="m12 3-1.465 4.965C9.643 10.37 6 11.235 6 11.235s1.42 5.07 1.42 5.07c.0 1.29.54 2.4 1.34 3.195C9.56 20.29 10.66 21 12 21c2.21 0 4-1.79 4-4 0-1.63-.98-3.03-2.345-3.66S10.36 11.41 12 3"/></svg>
+                    Análisis de Costos (IA)
+                  </span>
+                  <button
+                    (click)="analyzeCosts()"
+                    [disabled]="analysisLoading() || activitiesForSelectedFarm().length === 0"
+                    class="px-3 py-1 text-sm bg-purple-600 text-white rounded-full shadow-md hover:bg-purple-700 transition-all duration-300 disabled:opacity-70 disabled:cursor-wait">
+                    @if (analysisLoading()) {
+                      <span>Analizando...</span>
+                    } @else {
+                      <span>Re-analizar Gastos</span>
+                    }
+                  </button>
                 </h3>
-                <div class="prose prose-sm max-w-none text-gray-800" [innerHTML]="analysisResult()"></div>
+                <div class="prose prose-sm max-w-none text-gray-800 border-t pt-3 mt-3" [innerHTML]="safeAnalysisResult()"></div>
+              </div>
+            } @else if (!analysisLoading()) {
+              <div class="p-6 rounded-2xl shadow-lg bg-white/30 backdrop-blur-md border border-gray-200/50 mb-6">
+                <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2">Análisis de Costos (IA)</h3>
+                <p class="text-sm text-gray-500 border-t pt-3 mt-3">Pulsa "Re-analizar Gastos" (aparecerá al lado del título) para generar un análisis financiero detallado de las actividades de esta finca.</p>
               </div>
             }
 
@@ -252,7 +419,7 @@ interface GeminiPayload {
                             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>
                           </button>
                           <!-- Botón Eliminar -->
-                          <button (click)="deleteActivity(act.id_actividad)" class="text-red-600 hover:text-red-900 transition-colors" title="Eliminar">
+                          <button (click)="requestDeleteActivity(act.id_actividad)" class="text-red-600 hover:text-red-900 transition-colors" title="Eliminar">
                             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
                           </button>
                         </td>
@@ -321,6 +488,11 @@ interface GeminiPayload {
                 class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500">
             </div>
             <div>
+              <label for="farm-crop" class="block text-sm font-medium text-gray-700 mb-1">Tipo de Cultivo (Ej: Arroz, Maíz):</label>
+              <input id="farm-crop" type="text" [(ngModel)]="newFarmCropType" name="farm-crop" required
+                class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500">
+            </div>
+            <div>
               <label for="farm-size" class="block text-sm font-medium text-gray-700 mb-1">Tamaño (en tareas):</label>
               <input id="farm-size" type="number" [(ngModel)]="newFarmSize" name="farm-size" required
                 class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-green-500">
@@ -361,6 +533,7 @@ interface GeminiPayload {
               </div>
               <div>
                 <label for="act-day" class="block text-sm font-medium text-gray-700 mb-1">Día:</label>
+                <!-- El día se calcula automáticamente en base a la fecha, no se usa ngModel -->
                 <input id="act-day" type="text" [value]="getSpanishDayOfWeek(activityForm().fecha)" name="act-day" readonly
                   class="w-full p-3 border border-gray-300 rounded-lg bg-gray-100 cursor-not-allowed">
               </div>
@@ -382,7 +555,7 @@ interface GeminiPayload {
             <div>
               <label for="act-work" class="block text-sm font-medium text-gray-700 mb-1">Trabajo Realizado:</label>
               <input id="act-work" type="text" [(ngModel)]="activityForm().trabajo_realizado" name="act-work" required
-                placeholder="Ej: Fangueo, Nivelación, Siembra..."
+                placeholder="Ej: Riego, Abonado, Fangueo..."
                 class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500">
             </div>
             <div>
@@ -408,6 +581,118 @@ interface GeminiPayload {
               </button>
             </div>
           </form>
+        </div>
+      </div>
+    }
+
+    <!-- Modal de Importación de Datos CSV -->
+    @if (showImportModal()) {
+      <div class="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-center items-center p-4 z-50" (click)="showImportModal.set(false)">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 sm:p-8" (click)="$event.stopPropagation()">
+          <h3 class="text-2xl font-semibold mb-4 text-gray-800">Importar Datos CSV</h3>
+          <p class="text-sm text-gray-600 mb-4">Utiliza esta herramienta para cargar fincas y actividades masivamente desde archivos CSV.</p>
+
+          <form (ngSubmit)="handleImportData()" class="space-y-6">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <!-- Carga de Fincas -->
+              <div class="p-4 border border-gray-200 rounded-lg bg-gray-50">
+                <h4 class="font-bold text-gray-800 mb-2">Paso 1: Archivo de Fincas</h4>
+                <p class="text-xs text-gray-500 mb-3">Columnas requeridas: 
+                    <code class="text-xs font-mono">nombre_finca</code>, 
+                    <code class="text-xs font-mono">tamano_tareas</code>, 
+                    <code class="text-xs font-mono">ubicacion</code>, 
+                    <code class="text-xs font-mono">tipo_cultivo</code>
+                </p>
+                <input id="file-farms" type="file" (change)="onFileChange($event, 'farms')" accept=".csv" required
+                  class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-100 file:text-green-700 hover:file:bg-green-200">
+              </div>
+              
+              <!-- Carga de Actividades -->
+              <div class="p-4 border border-gray-200 rounded-lg bg-gray-50">
+                <h4 class="font-bold text-gray-800 mb-2">Paso 2: Archivo de Actividades</h4>
+                <p class="text-xs text-gray-500 mb-3">Columnas requeridas: 
+                    <code class="text-xs font-mono">nombre_finca</code>, 
+                    <code class="text-xs font-mono">fecha</code> (YYYY-MM-DD), 
+                    <code class="text-xs font-mono">trabajo_realizado</code>, 
+                    <code class="text-xs font-mono">productos</code>, 
+                    <code class="text-xs font-mono">coste</code>
+                </p>
+                <input id="file-activities" type="file" (change)="onFileChange($event, 'activities')" accept=".csv" required
+                  class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-100 file:text-blue-700 hover:file:bg-blue-200">
+              </div>
+            </div>
+            
+            @if (importStatusMessage()) {
+                <div class="p-3 rounded-lg text-sm" 
+                    [ngClass]="importStatusMessage().startsWith('Éxito') ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'">
+                    {{ importStatusMessage() }}
+                </div>
+            }
+
+            <div class="flex justify-end gap-3 pt-4">
+              <button type="button" (click)="showImportModal.set(false)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                Cerrar
+              </button>
+              <button type="submit" [disabled]="!filesToImport.farms || !filesToImport.activities || isImporting()" 
+                      class="px-4 py-2 bg-purple-600 text-white rounded-lg shadow-md hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                @if (isImporting()) {
+                  <span>Importando...</span>
+                } @else {
+                  <span>Cargar y Procesar Datos</span>
+                }
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    }
+
+    <!-- NUEVO MODAL: Fin del Ciclo de Cultivo -->
+    @if (showEndCropModal()) {
+        <div class="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-center items-center p-4 z-50" (click)="showEndCropModal.set(false)">
+            <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6 sm:p-8" (click)="$event.stopPropagation()">
+                <h3 class="text-2xl font-semibold mb-6 text-gray-800">Cierre de Ciclo - {{ selectedFarm()?.nombre_finca }}</h3>
+                <form (ngSubmit)="generateFinalReport()" class="space-y-4">
+                    <div>
+                        <label for="end-date" class="block text-sm font-medium text-gray-700 mb-1">Fecha de Finalización del Ciclo:</label>
+                        <input id="end-date" type="date" [(ngModel)]="endCropDate" name="end-date" required
+                            [max]="getTodayDate()"
+                            class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-red-500">
+                    </div>
+                    <div>
+                        <label for="total-revenue" class="block text-sm font-medium text-gray-700 mb-1">Beneficio Total (Ingreso RD$):</label>
+                        <input id="total-revenue" type="text" inputmode="decimal" [(ngModel)]="endCropRevenue" name="total-revenue" required
+                            placeholder="Ej: 500000"
+                            class="w-full p-3 border border-gray-300 rounded-lg shadow-sm focus:ring-2 focus:ring-red-500">
+                    </div>
+                    
+                    <div class="flex justify-end gap-3 pt-4">
+                        <button type="button" (click)="showEndCropModal.set(false)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+                            Cancelar
+                        </button>
+                        <button type="submit" class="px-4 py-2 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors">
+                            Generar Reporte Final
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    }
+
+    <!-- Modal de Confirmación de Eliminación -->
+    @if (activityToDelete()) {
+      <div class="fixed inset-0 bg-black/50 backdrop-blur-sm flex justify-center items-center p-4 z-50" (click)="activityToDelete.set(null)">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 sm:p-8" (click)="$event.stopPropagation()">
+          <h3 class="text-xl font-semibold mb-4 text-gray-800">Confirmar Eliminación</h3>
+          <p class="mb-6 text-gray-600">¿Está seguro de que desea eliminar la actividad?</p>
+          <div class="flex justify-end gap-3 pt-2">
+            <button type="button" (click)="activityToDelete.set(null)" class="px-4 py-2 bg-gray-200 text-gray-700 rounded-lg hover:bg-gray-300 transition-colors">
+              Cancelar
+            </button>
+            <button type="button" (click)="deleteActivity(activityToDelete()!)" class="px-4 py-2 bg-red-600 text-white rounded-lg shadow-md hover:bg-red-700 transition-colors">
+              Eliminar
+            </button>
+          </div>
         </div>
       </div>
     }
@@ -440,7 +725,7 @@ interface GeminiPayload {
     .metric-value {
       animation: pulse-subtle 1s ease-out;
     }
-  
+    
     @keyframes pulse-subtle {
       0% {
         transform: scale(1);
@@ -456,6 +741,30 @@ interface GeminiPayload {
       }
     }
 
+    /* Estilos personalizados para los tips de cultivo */
+    /* Targeteamos los H2 generados por el Markdown (## Riego) */
+    .crop-tips-content h2 {
+      color: #059669; /* emerald-600 */
+      font-weight: 700;
+      font-size: 1.25rem; /* text-xl */
+      border-bottom: 2px solid #a7f3d0; /* emerald-200 */
+      padding-bottom: 0.5rem;
+      margin-top: 1.5rem; /* Separación superior */
+      margin-bottom: 1rem;
+    }
+
+    /* Estilo para listas y párrafos dentro de los tips para un mejor espaciado */
+    .crop-tips-content p {
+      margin-bottom: 1rem;
+      line-height: 1.6;
+    }
+    .crop-tips-content ul,
+    .crop-tips-content ol {
+      padding-left: 1.5rem;
+      margin-bottom: 1rem;
+      list-style-type: disc; /* Asegura viñetas */
+    }
+
     /* Estilos para navegadores que no soportan backdrop-filter */
     @supports not (backdrop-filter: blur(12px)) {
       .backdrop-blur-md {
@@ -465,8 +774,13 @@ interface GeminiPayload {
   `],
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
+export class App {
   
+  // --- DEPENDENCIAS ---
+  private cdr = inject(ChangeDetectorRef);
+  // Se inyecta DomSanitizer para asegurar que el HTML generado por la IA sea seguro
+  private sanitizer = inject(DomSanitizer);
+
   // --- SEÑALES DE ESTADO PRINCIPALES ---
   
   /** Lista de todas las fincas */
@@ -485,25 +799,68 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
   
   /** Nombre para la nueva finca */
   newFarmName = signal('');
+  /** Tipo de cultivo para la nueva finca */
+  newFarmCropType = signal(''); 
   /** Tamaño para la nueva finca */
   newFarmSize = signal<number | null>(null);
   /** Ubicación para la nueva finca */
   newFarmLocation = signal('');
   
-  /**
-   * Estado del formulario de actividad.
-   * Usamos una señal que contiene un objeto para el formulario.
-   */
+  /** Estado del formulario de actividad. */
   activityForm = signal<ActivityForm>(this.getEmptyActivityForm());
   
+  /** ID de la actividad a eliminar (para el modal de confirmación) */
+  activityToDelete = signal<string | null>(null);
+  
+  // --- SEÑALES PARA CIERRE DE CICLO ---
+  
+  /** Controla la visibilidad del modal de cierre de ciclo */
+  showEndCropModal = signal(false); 
+  /** Fecha de fin de ciclo ingresada por el usuario */
+  endCropDate = signal<string>(this.getTodayDate()); 
+  /** Ingreso total del cultivo ingresado por el usuario (como string para input) */
+  endCropRevenue = signal<string>('0'); 
+  /** Almacena el reporte final del ciclo */
+  cropReport = signal<CropReport | null>(null); 
+
+  // --- SEÑALES PARA IMPORTACIÓN CSV ---
+
+  /** Controla la visibilidad del modal de importación */
+  showImportModal = signal(false); 
+  /** Almacena los archivos seleccionados */
+  filesToImport: { farms: File | null, activities: File | null } = { farms: null, activities: null }; 
+  /** Estado del proceso de importación */
+  importStatusMessage = signal<string | null>(null); 
+  /** Indicador de importación en curso */
+  isImporting = signal(false); 
+
   // --- SEÑALES PARA IA (GEMINI) ---
   
-  /** Almacena el resultado del análisis de IA */
+  /** Almacena el resultado del análisis de IA (Costos) */
   analysisResult = signal<string | null>(null);
-  /** Indica si el análisis de IA está cargando */
+  /** Indica si el análisis de IA (Costos) está cargando */
   analysisLoading = signal(false);
 
+  /** Almacena el resultado de los tips de cultivo de IA */
+  cropTipsResult = signal<string | null>(null); 
+  /** Indica si la generación de tips está cargando */
+  cropTipsLoading = signal(false); 
+
+
   // --- DATOS DERIVADOS (COMPUTED) ---
+
+  /** Retorna el resultado del análisis de IA (Costos) como HTML seguro */
+  safeAnalysisResult = computed<SafeHtml | null>(() => {
+    const result = this.analysisResult();
+    return result ? this.sanitizer.bypassSecurityTrustHtml(result) : null;
+  });
+
+  /** Retorna el resultado de los tips de IA como HTML seguro */
+  safeCropTipsResult = computed<SafeHtml | null>(() => {
+    const result = this.cropTipsResult();
+    return result ? this.sanitizer.bypassSecurityTrustHtml(result) : null;
+  });
+
 
   /** Objeto de la finca seleccionada */
   selectedFarm = computed(() => {
@@ -543,6 +900,7 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
     const id = this.selectedFarmId();
     return this.activities()
       .filter(a => a.id_finca === id)
+      // Ordenar por fecha descendente
       .sort((a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime());
   });
 
@@ -556,6 +914,39 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
     return totalCost / farm.tamano_tareas;
   });
   
+  /**
+   * Resume el conteo y costo total por tipo de actividad.
+   */
+  activitySummary = computed<Record<string, ActivitySummary>>(() => {
+    const summary: Record<string, ActivitySummary> = {};
+    const activities = this.activitiesForSelectedFarm();
+
+    for (const activity of activities) {
+      // Normalizar la clave de la actividad (ej: "Riego de Canal" -> "riego")
+      const cleanName = activity.trabajo_realizado.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+      let key = cleanName;
+
+      // Agrupar variantes de actividades clave
+      if (cleanName.includes('riego')) {
+        key = 'riego';
+      } else if (cleanName.includes('abono') || cleanName.includes('fertiliz')) {
+        key = 'abonado';
+      } else {
+        // Para otras actividades no agrupadas, usar el nombre limpio
+        key = cleanName.replace(/\s/g, '_'); 
+      }
+
+      if (!summary[key]) {
+        summary[key] = { count: 0, totalCost: 0 };
+      }
+
+      summary[key].count += 1;
+      summary[key].totalCost += activity.coste;
+    }
+
+    return summary;
+  });
+
   /** Datos para el gráfico de gastos por actividad (Top 5) */
   topSpendingActivities = computed(() => {
     const spendingMap = new Map<string, number>();
@@ -585,6 +976,7 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
     
     const weeklyMap = new Map<string, number>();
     const days = [];
+    // Nombres de días en español
     const dayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
     
     // Inicializar los últimos 7 días
@@ -606,13 +998,14 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
     }
     
     let maxTotal = 0;
+    // Map the days array in the correct chronological order (oldest to newest)
     const finalData = days.map(day => {
       const total = weeklyMap.get(day.dateString)!;
       if (total > maxTotal) maxTotal = total;
       return { day: day.day, total };
     });
     
-    if (maxTotal === 0) maxTotal = 1; // Evitar división por cero
+    if (maxTotal === 0) maxTotal = 1; // Evitar división por cero para el cálculo del porcentaje
     
     return finalData.map(day => ({
       ...day,
@@ -622,111 +1015,64 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
 
   // --- CONSTRUCTOR Y CICLO DE VIDA ---
   
-  private cdr = inject(ChangeDetectorRef); // <-- Inyectado aquí
-
-  constructor() { // <-- Se quita del constructor
+  constructor() {
     this.loadFromLocalStorage();
     
     // Efecto para guardar en localStorage cada vez que cambien fincas o actividades
     effect(() => {
       const farmsData = this.farms();
       const activitiesData = this.activities();
-      console.log('Guardando en localStorage...');
-      localStorage.setItem('agri_farms', JSON.stringify(farmsData));
-      localStorage.setItem('agri_activities', JSON.stringify(activitiesData));
-    });
-
-    // Efecto para limpiar el análisis de IA cuando cambia la finca
-    effect(() => {
-      this.selectedFarmId(); // Registrar dependencia
-      this.analysisResult.set(null);
-      this.analysisLoading.set(false);
+      
+      try {
+        localStorage.setItem('agricolaFarms', JSON.stringify(farmsData));
+        localStorage.setItem('agricolaActivities', JSON.stringify(activitiesData));
+      } catch (e) {
+        console.error('Error saving data to local storage', e);
+      }
+      
+      // Aseguramos que Angular actualice la vista si es necesario después de un cambio de datos importante
+      this.cdr.detectChanges();
     });
   }
-
-  // --- LÓGICA DE ALMACENAMIENTO (LocalStorage) ---
   
-  loadFromLocalStorage() {
+  /**
+   * Carga datos iniciales de localStorage.
+   */
+  private loadFromLocalStorage(): void {
     try {
-      const farmsData = localStorage.getItem('agri_farms');
-      const activitiesData = localStorage.getItem('agri_activities');
-      
-      if (farmsData) {
-        this.farms.set(JSON.parse(farmsData));
-      }
-      if (activitiesData) {
-        this.activities.set(JSON.parse(activitiesData));
+      const savedFarms = localStorage.getItem('agricolaFarms');
+      if (savedFarms) {
+        const parsedFarms: Farm[] = JSON.parse(savedFarms);
+        this.farms.set(parsedFarms);
       }
 
-      // Si hay fincas, selecciona la primera por defecto
-      if (this.farms().length > 0 && !this.selectedFarmId()) {
-        this.selectedFarmId.set(this.farms()[0].id_finca);
+      const savedActivities = localStorage.getItem('agricolaActivities');
+      if (savedActivities) {
+        const parsedActivities: Activity[] = JSON.parse(savedActivities);
+        this.activities.set(parsedActivities);
       }
-      
-    } catch (error) {
-      console.error('Error al cargar datos de localStorage:', error);
-    }
-  }
 
-  // --- LÓGICA DE NEGOCIO (Fincas y Actividades) ---
-  
-  selectFarm(id: string | null) {
-    if (id) {
-      this.selectedFarmId.set(id);
-    }
-  }
-
-  saveFarm() {
-    const name = this.newFarmName().trim();
-    const size = this.newFarmSize();
-
-    if (!name || !size || size <= 0) {
-      console.error('Datos de finca inválidos');
-      // Aquí podrías mostrar un error al usuario
-      return;
-    }
-
-    const newFarm: Farm = {
-      id_finca: crypto.randomUUID(),
-      nombre_finca: name,
-      tamano_tareas: size,
-      ubicacion: this.newFarmLocation().trim()
-    };
-
-    this.farms.update(currentFarms => [...currentFarms, newFarm]);
-    
-    // Seleccionar la finca recién creada
-    this.selectedFarmId.set(newFarm.id_finca);
-    
-    // Limpiar formulario y cerrar modal
-    this.newFarmName.set('');
-    this.newFarmSize.set(null);
-    this.newFarmLocation.set('');
-    this.showFarmModal.set(false);
-  }
-
-  deleteFarm(id: string) {
-    // Implementar lógica de confirmación si se desea
-    
-    // Eliminar finca
-    this.farms.update(farms => farms.filter(f => f.id_finca !== id));
-    
-    // Eliminar actividades asociadas
-    this.activities.update(acts => acts.filter(a => a.id_finca !== id));
-
-    // Si la finca eliminada era la seleccionada, deseleccionar
-    if (this.selectedFarmId() === id) {
-      this.selectedFarmId.set(null);
-      // Opcional: seleccionar la primera finca si existe
+      // Si hay fincas, selecciona la primera por defecto para el dashboard.
       if (this.farms().length > 0) {
         this.selectedFarmId.set(this.farms()[0].id_finca);
       }
+    } catch (error) {
+      console.error('Error loading from local storage:', error);
     }
   }
 
-  // --- LÓGICA DE ACTIVIDADES ---
+  // --- MÉTODOS DE UTILIDAD ---
 
-  /** Devuelve un objeto de formulario de actividad vacío */
+  /**
+   * Genera un ID único.
+   */
+  private generateId(): string {
+    return Date.now().toString(36) + Math.random().toString(36).substring(2);
+  }
+
+  /**
+   * Devuelve la estructura de un formulario de actividad vacío con valores por defecto.
+   */
   getEmptyActivityForm(): ActivityForm {
     return {
       id_actividad: null,
@@ -736,302 +1082,692 @@ export class App { // <-- LA CORRECCIÓN ES ASEGURAR QUE 'export' ESTÉ AQUÍ
       hora_final: '',
       trabajo_realizado: '',
       productos: '',
-      coste: '' // Inicia como string vacío
+      coste: '0',
     };
   }
+  
+  /**
+   * Obtiene la fecha actual en formato YYYY-MM-DD.
+   */
+  getTodayDate(): string {
+    return new Date().toISOString().split('T')[0];
+  }
+  
+  /**
+   * Obtiene el día de la semana en español a partir de una fecha YYYY-MM-DD.
+   */
+  getSpanishDayOfWeek(dateString: string): string {
+    if (!dateString) return 'Seleccione fecha';
+    // Añadir T00:00:00 para evitar problemas de zona horaria con fechas
+    const date = new Date(dateString + 'T00:00:00'); 
+    return date.toLocaleDateString('es-ES', { weekday: 'long' });
+  }
 
-  /** Abre el modal para registrar una NUEVA actividad */
-  openNewActivityModal() {
-    if (!this.selectedFarmId()) return; // No abrir si no hay finca
+  /**
+   * Formatea un número a moneda de RD$ (Dominican Peso).
+   */
+  formatCurrency(value: number): string {
+    // Usar 'es-DO' (Español, República Dominicana) o 'es' con RD$
+    return new Intl.NumberFormat('es-DO', {
+      style: 'currency',
+      currency: 'DOP', // Dominican Peso
+      minimumFractionDigits: 2
+    }).format(value);
+  }
+  
+  /**
+   * Formatea la fecha de YYYY-MM-DD a DD/MM/YYYY.
+   */
+  formatDate(dateString: string): string {
+    if (!dateString) return '';
+    const [year, month, day] = dateString.split('-');
+    // Aseguramos que los componentes existan antes de unirlos
+    if (year && month && day) {
+      return `${day}/${month}/${year}`;
+    }
+    return dateString;
+  }
+
+  // --- MÉTODOS DE GESTIÓN DE FINCAS ---
+
+  /**
+   * Guarda una nueva finca o edita una existente.
+   */
+  saveFarm(): void {
+    if (!this.newFarmName() || !this.newFarmCropType() || this.newFarmSize() === null || this.newFarmSize()! <= 0) {
+      console.error('Faltan datos requeridos o el tamaño no es válido.');
+      this.importStatusMessage.set('Error: Faltan datos requeridos o el tamaño no es válido en la nueva finca.');
+      return;
+    }
+
+    const newFarm: Farm = {
+      id_finca: this.generateId(), // Siempre genera un nuevo ID
+      nombre_finca: this.newFarmName(),
+      tamano_tareas: this.newFarmSize()!,
+      ubicacion: this.newFarmLocation(),
+      tipo_cultivo: this.newFarmCropType().trim(), // <-- Incluir nuevo campo
+    };
+
+    this.farms.update(f => [...f, newFarm]);
+    this.showFarmModal.set(false);
+    this.newFarmName.set('');
+    this.newFarmCropType.set(''); 
+    this.newFarmSize.set(null);
+    this.newFarmLocation.set('');
     
-    this.activityForm.set({
-      id_actividad: null,
-      id_finca: this.selectedFarmId()!,
-      fecha: this.getTodayDate(),
-      hora_inicio: '',
-      hora_final: '',
-      trabajo_realizado: '',
-      productos: '',
-      coste: ''
-    });
+    // Selecciona la nueva finca si es la primera
+    if (this.farms().length === 1) {
+      this.selectedFarmId.set(newFarm.id_finca);
+    }
+  }
+
+  /**
+   * Selecciona una finca para ver en el dashboard.
+   */
+  selectFarm(id: string | null): void {
+    this.selectedFarmId.set(id);
+    this.analysisResult.set(null); 
+    this.analysisLoading.set(false);
+    this.cropTipsResult.set(null); 
+    this.cropTipsLoading.set(false); 
+    this.cropReport.set(null); 
+  }
+
+
+  // --- MÉTODOS DE GESTIÓN DE ACTIVIDADES ---
+
+  /**
+   * Abre el modal para registrar una nueva actividad.
+   */
+  openNewActivityModal(): void {
+    const selectedId = this.selectedFarmId();
+    if (!selectedId) return;
+
+    // Reinicia el formulario con valores por defecto y la finca seleccionada
+    this.activityForm.set(this.getEmptyActivityForm());
+    this.activityForm.update(form => ({...form, id_finca: selectedId}));
     this.showActivityModal.set(true);
   }
 
-  /** Abre el modal para EDITAR una actividad existente */
-  editActivity(activity: Activity) {
+  /**
+   * Prepara el formulario para editar una actividad existente.
+   */
+  editActivity(activity: Activity): void {
+    // Convertir el coste a string para el campo de texto (sin formato de moneda)
     this.activityForm.set({
       id_actividad: activity.id_actividad,
       id_finca: activity.id_finca,
-      fecha: activity.fecha, // El formato ya es YYYY-MM-DD
+      fecha: activity.fecha,
       hora_inicio: activity.hora_inicio,
       hora_final: activity.hora_final,
       trabajo_realizado: activity.trabajo_realizado,
       productos: activity.productos,
-      // Convertir el número de coste a string para el formulario
-      // Usamos 'es-DO' para que ponga la coma decimal si aplica
-      coste: activity.coste.toLocaleString('es-DO', { useGrouping: false, minimumFractionDigits: 0 }) 
+      coste: activity.coste.toFixed(2), // Usar punto decimal para edición
     });
     this.showActivityModal.set(true);
   }
 
-  /** Guarda (o actualiza) una actividad */
-  saveActivity() {
-    const form = this.activityForm();
-    const costValue = this.parseCurrency(form.coste);
+  /**
+   * Guarda o actualiza una actividad.
+   */
+  saveActivity(): void {
+    const formData = this.activityForm();
 
-    // --- Validación ---
-    if (!form.fecha) {
-      console.error("Formulario inválido: La 'Fecha' es obligatoria.");
-      return;
-    }
-    if (!form.trabajo_realizado) {
-      console.error("Formulario inválido: El 'Trabajo Realizado' es obligatorio.");
-      return;
-    }
-    if (isNaN(costValue)) {
-      console.error("Formulario inválido: El 'Coste' no es un número válido.");
-      return;
-    }
-     if (costValue < 0) {
-      console.error("Formulario inválido: El 'Coste' no puede ser negativo.");
+    // 1. Limpiar y convertir el coste de string a number
+    let cleanCost = formData.coste.replace(/,/g, ''); // Quitar comas (si las usa el usuario)
+    const costValue = parseFloat(cleanCost);
+
+    if (isNaN(costValue) || costValue < 0) {
+      console.error('El costo ingresado no es un número válido.');
+      // En una app real, mostraríamos un mensaje de error al usuario
       return;
     }
     
-    const activityData: Activity = {
-      id_actividad: form.id_actividad || crypto.randomUUID(),
-      id_finca: form.id_finca,
-      fecha: form.fecha,
-      dia_semana: this.getSpanishDayOfWeek(form.fecha),
-      hora_inicio: form.hora_inicio,
-      hora_final: form.hora_final,
-      trabajo_realizado: form.trabajo_realizado.trim(),
-      productos: form.productos.trim(),
-      coste: costValue // Usar el valor numérico parseado
+    // 2. Obtener el día de la semana
+    const dayOfWeek = this.getSpanishDayOfWeek(formData.fecha);
+
+    // 3. Crear el objeto final de actividad
+    const finalActivity: Activity = {
+      id_actividad: formData.id_actividad || this.generateId(),
+      id_finca: formData.id_finca,
+      fecha: formData.fecha,
+      dia_semana: dayOfWeek,
+      hora_inicio: formData.hora_inicio,
+      hora_final: formData.hora_final,
+      trabajo_realizado: formData.trabajo_realizado.trim(),
+      productos: formData.productos.trim(),
+      coste: costValue,
     };
 
-    if (form.id_actividad) {
-      // Es una actualización
-      this.activities.update(acts => 
-        acts.map(a => a.id_actividad === form.id_actividad ? activityData : a)
-      );
-    } else {
-      // Es una nueva actividad
-      this.activities.update(acts => [...acts, activityData]);
-    }
-    
+    // 4. Actualizar la lista de actividades
+    this.activities.update(acts => {
+      const existingIndex = acts.findIndex(a => a.id_actividad === finalActivity.id_actividad);
+
+      if (existingIndex > -1) {
+        // Editar
+        return acts.map((a, index) => index === existingIndex ? finalActivity : a);
+      } else {
+        // Nueva actividad
+        return [finalActivity, ...acts];
+      }
+    });
+
     this.showActivityModal.set(false);
-    this.activityForm.set(this.getEmptyActivityForm()); // Limpiar formulario
-    
-    // Forzar redetección para la animación
-    this.cdr.detectChanges();
   }
-
-  deleteActivity(id: string) {
-    // Implementar lógica de confirmación si se desea
-    this.activities.update(acts => acts.filter(a => a.id_actividad !== id));
-    // Forzar redetección para la animación
-    this.cdr.detectChanges();
+  
+  /**
+   * Pide confirmación para eliminar una actividad.
+   */
+  requestDeleteActivity(id: string): void {
+    this.activityToDelete.set(id);
   }
-
-  // --- LÓGICA DE ANÁLISIS CON IA (GEMINI) ---
 
   /**
-   * Prepara y envía la solicitud a la API de Gemini para analizar costos.
+   * Elimina una actividad por ID.
    */
-  async analyzeCosts() {
+  deleteActivity(id: string): void {
+    this.activities.update(acts => acts.filter(a => a.id_actividad !== id));
+    this.activityToDelete.set(null);
+  }
+  
+  /**
+   * Exporta las actividades de la finca seleccionada a un archivo CSV.
+   */
+  exportFarmData(): void {
     const farm = this.selectedFarm();
     const activities = this.activitiesForSelectedFarm();
 
     if (!farm || activities.length === 0) {
-      this.analysisResult.set("<p>No hay suficientes datos de actividades para analizar.</p>");
+        console.error('No hay datos o finca seleccionada para exportar.');
+        return;
+    }
+
+    // 1. Preparar el encabezado CSV (usando ';' como separador por defecto para Excel)
+    const header = "Finca;Cultivo;Fecha;Día;Trabajo_Realizado;Productos;Costo_RD$\n";
+
+    // 2. Formatear los datos
+    const csvRows = activities.map(act => {
+        // Usar punto (.) como separador decimal estándar para CSV
+        const costStr = act.coste.toFixed(2).replace('.', ','); 
+        
+        // Función auxiliar para sanitizar valores (remover ";" y asegurar que los strings largos se manejen)
+        const sanitize = (value: string | number) => {
+            let str = String(value).replace(/"/g, '""'); // Escapar comillas dobles
+            // Si el valor contiene el separador o un salto de línea, se encierra en comillas
+            if (str.includes(';') || str.includes('\n') || str.includes('\r')) {
+                return `"${str}"`;
+            }
+            return str;
+        };
+
+        return [
+            sanitize(farm.nombre_finca),
+            sanitize(farm.tipo_cultivo),
+            sanitize(act.fecha),
+            sanitize(act.dia_semana),
+            sanitize(act.trabajo_realizado),
+            sanitize(act.productos),
+            costStr // El coste ya está formateado
+        ].join(';');
+    }).join('\n');
+
+    const csvContent = header + csvRows;
+    
+    // 3. Crear el Blob y el enlace de descarga
+    const blob = new Blob(["\ufeff", csvContent], { type: 'text/csv;charset=utf-8;' }); // \ufeff es el BOM para forzar UTF-8 en Excel
+    const url = URL.createObjectURL(blob);
+    
+    const date = new Date().toISOString().split('T')[0];
+    const filename = `${farm.nombre_finca.replace(/\s/g, '_')}_Actividades_${date}.csv`;
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', filename);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }
+
+  // --- MÉTODOS DE CIERRE DE CICLO Y REPORTE FINAL ---
+
+  /**
+   * Abre el modal de cierre de ciclo.
+   */
+  openEndCropModal(): void {
+    const selectedId = this.selectedFarmId();
+    if (!selectedId || this.activitiesForSelectedFarm().length === 0) return;
+
+    this.endCropDate.set(this.getTodayDate());
+    this.endCropRevenue.set('0');
+    this.showEndCropModal.set(true);
+  }
+
+  /**
+   * Genera el reporte final de ingresos vs. gastos.
+   */
+  generateFinalReport(): void {
+    const farm = this.selectedFarm();
+    const activities = this.activitiesForSelectedFarm();
+    const totalExpenses = this.totalCostForSelectedFarm();
+
+    if (!farm || activities.length === 0) {
+      this.showEndCropModal.set(false);
+      console.error('No hay datos suficientes para generar el reporte.');
       return;
     }
 
-    this.analysisLoading.set(true);
-    this.analysisResult.set(null);
+    // 1. Convertir y validar el ingreso total
+    let cleanRevenue = this.endCropRevenue().replace(/,/g, '');
+    const totalRevenue = parseFloat(cleanRevenue);
 
-    // Preparar el prompt
-    const systemPrompt = `Eres un asistente experto en agronomía y finanzas agrícolas, especializado en cultivos de arroz en la República Dominicana. Analiza los siguientes datos de costos de una finca y provee un resumen ejecutivo breve (máximo 3 párrafos). Tu respuesta debe estar en HTML (usa <p>, <strong>, <ul>, <li>).
+    if (isNaN(totalRevenue) || totalRevenue < 0) {
+      console.error('El ingreso total no es un número válido.');
+      return;
+    }
+    
+    // 2. Determinar el inicio y fin del ciclo
+    const sortedActivities = activities.sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime());
+    const startDateString = sortedActivities[0].fecha;
+    const endDateString = this.endCropDate();
 
-Tu análisis debe incluir:
-1.  Identificar la actividad (trabajo_realizado) con el costo acumulado más alto.
-2.  Mencionar el costo total de la finca.
-3.  Dar una recomendación clave o un punto de atención basado en los datos (ej. "Vigilar el alto costo de fertilizantes" o "El costo de chapeo parece elevado para esta etapa").
-4.  Mantén un tono profesional y útil.`;
+    // Asegurar que las fechas sean objetos Date válidos para el cálculo de la duración
+    const startDate = new Date(startDateString + 'T00:00:00');
+    const endDate = new Date(endDateString + 'T00:00:00');
+    
+    // 3. Calcular la duración (Asegurar que la duración no sea negativa)
+    let diffTime = endDate.getTime() - startDate.getTime();
+    if (diffTime < 0) diffTime = 0;
+    
+    const durationDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+    
+    // 4. Calcular el Beneficio Neto
+    const netProfit = totalRevenue - totalExpenses;
 
-    const dataPrompt = `
-Datos de la Finca:
-- Nombre: ${farm.nombre_finca}
-- Tamaño: ${farm.tamano_tareas} tareas
-- Costo Total Acumulado: ${this.formatCurrency(this.totalCostForSelectedFarm())}
+    // 5. Crear y establecer el reporte
+    const report: CropReport = {
+      farmName: farm.nombre_finca,
+      cropType: farm.tipo_cultivo,
+      startDate: startDateString,
+      endDate: endDateString,
+      totalRevenue: totalRevenue,
+      totalExpenses: totalExpenses,
+      netProfit: netProfit,
+      durationDays: durationDays,
+      reportDate: this.getTodayDate(),
+    };
+    
+    this.cropReport.set(report);
+    this.showEndCropModal.set(false);
+  }
 
-Lista de Actividades y Costos:
-${activities.map(a => `- Fecha: ${this.formatDate(a.fecha)}, Actividad: ${a.trabajo_realizado}, Costo: ${this.formatCurrency(a.coste)}`).join('\n')}
+  // --- MÉTODOS DE IMPORTACIÓN CSV ---
 
-Por favor, genera el análisis experto.`;
+  /**
+   * Maneja la selección de archivos para importación.
+   */
+  onFileChange(event: Event, type: 'farms' | 'activities'): void {
+    const input = event.target as HTMLInputElement;
+    if (input.files && input.files.length > 0) {
+      this.filesToImport[type] = input.files[0];
+    }
+  }
+
+  /**
+   * Función utilitaria para parsear líneas CSV a objetos.
+   */
+  private parseCsv(csv: string): string[][] {
+    const lines = csv.split('\n').filter(line => line.trim() !== '');
+    if (lines.length === 0) return [];
+
+    // Detectar delimitador: , (coma), ; (punto y coma), o \t (tabulación)
+    let delimiter = ',';
+    if (lines[0].includes(';')) {
+        delimiter = ';';
+    } else if (lines[0].includes('\t')) {
+        delimiter = '\t';
+    }
+    
+    return lines.map(line => {
+      // Uso de regex para manejar comillas y el separador (simplificado)
+      const values = line.match(/(".*?"|[^"|;,\t]+)+(?=[;,\t]|\n|$)/g) || [];
+      // Si la línea no coincide con la regex (por un delimitador inesperado), usamos split simple
+      if (values.length === 0 && line.length > 0) {
+          return line.split(delimiter).map(value => value.trim().replace(/^"|"$/g, ''));
+      }
+      
+      return values.map(value => {
+        // Limpiar comillas iniciales/finales y reemplazar comillas dobles internas por simples
+        return value.trim().replace(/^"|"$/g, '').replace(/""/g, '"');
+      });
+    });
+  }
+
+  /**
+   * Procesa los archivos CSV importados.
+   */
+  async handleImportData(): Promise<void> {
+    const { farms: farmsFile, activities: activitiesFile } = this.filesToImport;
+
+    if (!farmsFile || !activitiesFile) {
+      this.importStatusMessage.set('Error: Debe seleccionar ambos archivos CSV.');
+      return;
+    }
+
+    this.isImporting.set(true);
+    this.importStatusMessage.set('Importando datos, por favor espere...');
 
     try {
-      const result = await this.callGemini(dataPrompt, systemPrompt);
-      this.analysisResult.set(result);
+      // 1. Leer y parsear Fincas
+      const farmsText = await farmsFile.text();
+      const farmsCsv = this.parseCsv(farmsText);
+      const importedFarms: Farm[] = this.processFarmsCsv(farmsCsv);
+      
+      // 2. Leer y parsear Actividades
+      const activitiesText = await activitiesFile.text();
+      const activitiesCsv = this.parseCsv(activitiesText);
+      const importedActivities: Activity[] = this.processActivitiesCsv(activitiesCsv, importedFarms);
+      
+      // 3. Actualizar el estado global
+      this.farms.update(f => [...f, ...importedFarms]);
+      this.activities.update(a => [...a, ...importedActivities]);
+      
+      // 4. Seleccionar la primera finca importada si no hay ninguna seleccionada
+      if (!this.selectedFarmId() && this.farms().length > 0) {
+        this.selectedFarmId.set(this.farms()[0].id_finca);
+      }
+      
+      this.importStatusMessage.set(`Éxito: Se importaron ${importedFarms.length} fincas y ${importedActivities.length} actividades.`);
+
     } catch (error) {
-      console.error('Error al llamar a la API de Gemini:', error);
-      this.analysisResult.set('<p><strong>Error:</strong> No se pudo completar el análisis. Inténtelo más tarde.</p>');
+      this.importStatusMessage.set(`Error al procesar la importación: ${error instanceof Error ? error.message : 'Error desconocido'}`);
+      console.error('Import error:', error);
     } finally {
-      this.analysisLoading.set(false);
+      this.isImporting.set(false);
+      // Limpiar archivos seleccionados
+      this.filesToImport = { farms: null, activities: null };
+      const farmInput = document.getElementById('file-farms') as HTMLInputElement;
+      if (farmInput) farmInput.value = '';
+      const activityInput = document.getElementById('file-activities') as HTMLInputElement;
+      if (activityInput) activityInput.value = '';
     }
   }
 
   /**
-   * Llama a la API de Gemini (simulado o real)
-   * NOTA: Esta función usa la API 'generateContent' de Gemini.
+   * Procesar el CSV de fincas.
    */
-  async callGemini(prompt: string, systemPrompt: string): Promise<string> {
-    const apiKey = ""; // La API Key se gestiona automáticamente en este entorno
+  private processFarmsCsv(csvData: string[][]): Farm[] {
+    const [header, ...rows] = csvData;
+    if (!header || rows.length === 0) throw new Error('El archivo de fincas está vacío o mal formado.');
+
+    // Asumir que el header está en la primera fila y determinar los índices
+    const getIndex = (key: string) => header.findIndex(h => h.trim().toLowerCase() === key.toLowerCase());
+
+    const nameIndex = getIndex('nombre_finca');
+    const sizeIndex = getIndex('tamano_tareas');
+    const locIndex = getIndex('ubicacion');
+    const cropIndex = getIndex('tipo_cultivo');
+
+    if (nameIndex === -1 || sizeIndex === -1 || cropIndex === -1) {
+      throw new Error('El archivo de fincas debe contener las columnas: nombre_finca, tamano_tareas, tipo_cultivo.');
+    }
+
+    const newFarms: Farm[] = [];
+    const existingFarmNames = new Set(this.farms().map(f => f.nombre_finca.toLowerCase()));
+
+    for (const row of rows) {
+      if (row.length <= Math.max(nameIndex, sizeIndex, cropIndex)) continue; // Fila incompleta
+
+      const name = row[nameIndex]?.trim();
+      
+      // Evitar duplicados por nombre
+      if (!name || existingFarmNames.has(name.toLowerCase())) {
+        console.warn(`Finca duplicada u omitida (nombre vacío): ${name}`);
+        continue;
+      }
+
+      const size = parseFloat(row[sizeIndex]?.replace(/,/g, '') || '0');
+      if (isNaN(size) || size <= 0) {
+        console.warn(`Finca "${name}" omitida: Tamaño inválido.`);
+        continue;
+      }
+
+      const cropType = row[cropIndex]?.trim();
+      if (!cropType) {
+        console.warn(`Finca "${name}" omitida: Tipo de cultivo vacío.`);
+        continue;
+      }
+
+      newFarms.push({
+        id_finca: this.generateId(),
+        nombre_finca: name,
+        tamano_tareas: size,
+        ubicacion: locIndex !== -1 ? (row[locIndex]?.trim() || '') : '',
+        tipo_cultivo: cropType,
+      });
+      existingFarmNames.add(name.toLowerCase());
+    }
+
+    return newFarms;
+  }
+
+  /**
+   * Procesar el CSV de actividades.
+   */
+  private processActivitiesCsv(csvData: string[][], newFarms: Farm[]): Activity[] {
+    const [header, ...rows] = csvData;
+    if (!header || rows.length === 0) throw new Error('El archivo de actividades está vacío o mal formado.');
+
+    const getIndex = (key: string) => header.findIndex(h => h.trim().toLowerCase() === key.toLowerCase());
+    
+    const farmNameIndex = getIndex('nombre_finca');
+    const dateIndex = getIndex('fecha');
+    const workIndex = getIndex('trabajo_realizado');
+    const productsIndex = getIndex('productos');
+    const costIndex = getIndex('coste');
+
+    if (farmNameIndex === -1 || dateIndex === -1 || workIndex === -1 || costIndex === -1) {
+      throw new Error('El archivo de actividades debe contener las columnas: nombre_finca, fecha, trabajo_realizado, coste.');
+    }
+
+    const allFarms = [...this.farms(), ...newFarms];
+    const farmMap = new Map<string, string>(); // nombre_finca.toLowerCase() -> id_finca
+
+    allFarms.forEach(f => farmMap.set(f.nombre_finca.toLowerCase(), f.id_finca));
+
+    const newActivities: Activity[] = [];
+
+    for (const row of rows) {
+      if (row.length <= Math.max(farmNameIndex, dateIndex, workIndex, costIndex)) continue; // Fila incompleta
+
+      const farmName = row[farmNameIndex]?.trim().toLowerCase();
+      const id_finca = farmMap.get(farmName);
+
+      if (!id_finca) {
+        console.warn(`Actividad omitida: Finca "${farmName}" no encontrada.`);
+        continue;
+      }
+      
+      const costValue = parseFloat(row[costIndex]?.replace(/,/g, '') || '0');
+      const dateString = row[dateIndex]?.trim();
+      const work = row[workIndex]?.trim();
+
+      if (isNaN(costValue) || costValue < 0) {
+        console.warn(`Actividad en finca "${farmName}" omitida: Costo inválido.`);
+        continue;
+      }
+      if (!dateString || !work) {
+         console.warn(`Actividad en finca "${farmName}" omitida: Fecha o Trabajo vacío.`);
+         continue;
+      }
+
+      // Validar formato de fecha simple (YYYY-MM-DD)
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dateString)) {
+         console.warn(`Actividad en finca "${farmName}" omitida: Formato de fecha "${dateString}" debe ser YYYY-MM-DD.`);
+         continue;
+      }
+
+      newActivities.push({
+        id_actividad: this.generateId(),
+        id_finca: id_finca,
+        fecha: dateString,
+        dia_semana: this.getSpanishDayOfWeek(dateString), // Se calcula automáticamente
+        hora_inicio: '', // No requerido en CSV, se deja vacío
+        hora_final: '',  // No requerido en CSV, se deja vacío
+        trabajo_realizado: work,
+        productos: productsIndex !== -1 ? (row[productsIndex]?.trim() || '') : '',
+        coste: costValue,
+      });
+    }
+
+    return newActivities;
+  }
+
+  // --- INTEGRACIÓN GEMINI API ---
+
+  /**
+   * Función que llama a la API de Gemini con lógica de reintento (backoff).
+   */
+  private async callGeminiApi(payload: GeminiPayload, retries = 0): Promise<string> {
+    const apiKey = ""; // La clave se proporciona automáticamente en el entorno
     const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
 
-    const payload: GeminiPayload = {
-      contents: [{
-        parts: [{ text: prompt }]
-      }],
-      systemInstruction: {
-        parts: [{ text: systemPrompt }]
-      },
-    };
+    try {
+      const response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-    // Función de reintento con backoff exponencial
-    const fetchWithRetry = async (retries = 3, delay = 1000): Promise<Response> => {
-      try {
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        
-        if (response.status === 429 || response.status >= 500) { // Too Many Requests o Server Error
-          if (retries > 0) {
-            await new Promise(res => setTimeout(res, delay));
-            return fetchWithRetry(retries - 1, delay * 2);
-          }
+      if (!response.ok) {
+        if (response.status === 429 && retries < 3) {
+          const delay = Math.pow(2, retries) * 1000;
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return this.callGeminiApi(payload, retries + 1); // Reintento recursivo
         }
-        return response;
-      } catch (error) {
-        if (retries > 0) {
-          await new Promise(res => setTimeout(res, delay));
-          return fetchWithRetry(retries - 1, delay * 2);
-        }
-        throw error;
+        throw new Error(`API error: ${response.status} ${response.statusText}`);
       }
-    };
 
-    const response = await fetchWithRetry();
+      const result = await response.json();
+      const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`Error en la API de Gemini: ${response.status} ${response.statusText}. Cuerpo: ${errorBody}`);
+      if (!text) {
+        throw new Error("API response structure invalid or content missing.");
+      }
+
+      return text;
+
+    } catch (error) {
+      console.error('Gemini API call failed:', error);
+      return `**Error al contactar al modelo de IA:** ${error instanceof Error ? error.message : String(error)}`;
     }
-
-    const result = await response.json() as GeminiResponse;
-    
-    const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!text) {
-      throw new Error('Respuesta de Gemini inválida o vacía.');
-    }
-    
-    return text;
-  }
-
-  // --- FUNCIONES UTILITARIAS (Helpers) ---
-
-  /** Formatea un número como moneda RD$ (1,250.75) */
-  formatCurrency(value: number): string {
-    // Usamos 'en-US' para forzar el formato 1,250.75
-    // y 'style: 'decimal'' para que no ponga el símbolo 'DOP'.
-    // Luego, añadimos 'RD$' manualmente.
-    const numberPart = new Intl.NumberFormat('en-US', {
-      style: 'decimal', // 'decimal' en lugar de 'currency'
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    }).format(value);
-
-    // Prependemos el símbolo de moneda de RD
-    return `RD$ ${numberPart}`;
-  }
-
-  /** Formatea una fecha YYYY-MM-DD a DD/MM/YYYY */
-  formatDate(dateString: string): string {
-    if (!dateString || !dateString.includes('-')) return dateString;
-    const [year, month, day] = dateString.split('-');
-    return `${day}/${month}/${year}`;
   }
 
   /**
-   * Convierte un string de moneda (con comas o puntos) a un número flotante.
-   * Acepta formatos como: "1,500.25", "1.500,25", "15,000", "15,50", "15.000", "15.50".
+   * Analiza los costos de la finca seleccionada usando el modelo Gemini.
    */
-  parseCurrency(value: string | null): number {
-    if (value === null || typeof value !== 'string' || value.trim() === '') {
-      return NaN; // Devuelve NaN para validación
+  async analyzeCosts(): Promise<void> {
+    const farm = this.selectedFarm();
+    if (!farm || this.analysisLoading()) return;
+
+    this.analysisLoading.set(true);
+    this.analysisResult.set(null); // Limpiar resultado anterior
+
+    const activities = this.activitiesForSelectedFarm();
+    if (activities.length === 0) {
+      this.analysisResult.set('No hay actividades registradas para analizar en esta finca.');
+      this.analysisLoading.set(false);
+      return;
     }
 
-    let cleanValue = value.trim();
-    
-    const lastComma = cleanValue.lastIndexOf(',');
-    const lastPeriod = cleanValue.lastIndexOf('.');
+    // Preparar los datos para el prompt
+    const dataForAnalysis = activities.map(act => ({
+      Fecha: act.fecha,
+      Trabajo: act.trabajo_realizado,
+      Productos: act.productos || 'N/A',
+      Costo: this.formatCurrency(act.coste),
+    }));
 
-    // Caso 1: "1.500,25" (Punto-miles, Coma-decimal)
-    if (lastPeriod !== -1 && lastComma !== -1 && lastComma > lastPeriod) {
-      cleanValue = cleanValue.replace(/\./g, ''); // Quitar puntos de miles
-      cleanValue = cleanValue.replace(',', '.'); // Reemplazar coma decimal
-    } 
-    // Caso 2: "1,500.25" (Coma-miles, Punto-decimal)
-    else if (lastPeriod !== -1 && lastComma !== -1 && lastPeriod > lastComma) {
-      cleanValue = cleanValue.replace(/,/g, ''); // Quitar comas de miles
-    }
-    // Caso 3: "15,000" (Solo comas)
-    else if (lastComma !== -1 && lastPeriod === -1) {
-      const afterComma = cleanValue.substring(lastComma + 1);
-      // Heurística: si hay 3 dígitos después, es de miles. Si no, es decimal.
-      if (afterComma.length === 3 && cleanValue.length > 3) { // "15,000"
-        cleanValue = cleanValue.replace(/,/g, ''); // Es separador de miles
-      } else { // "15,50" o "15,0"
-        cleanValue = cleanValue.replace(',', '.'); // Es decimal
-      }
-    }
-    // Caso 4: "15.000" (Solo puntos)
-    else if (lastPeriod !== -1 && lastComma === -1) {
-       const afterPeriod = cleanValue.substring(lastPeriod + 1);
-       const periodCount = (cleanValue.match(/\./g) || []).length;
-       
-       // Si hay más de un punto ("1.500.000")
-       // o si hay un punto y 3 dígitos después ("15.000")
-       if (periodCount > 1 || (periodCount === 1 && afterPeriod.length === 3 && cleanValue.length > 3)) { 
-         cleanValue = cleanValue.replace(/\./g, ''); // Tratar como separador de miles
-       }
-       // Si es "15.50" (periodCount === 1, afterPeriod.length === 2), no se hace nada.
-    }
-    // Caso 5: "1500" (Sin separadores) - no se hace nada.
-    
-    // Quitar cualquier cosa que no sea número o el punto decimal final
-    cleanValue = cleanValue.replace(/[^0-9.]/g, '');
+    const farmDetails = {
+      Finca: farm.nombre_finca,
+      Tareas: farm.tamano_tareas,
+      Cultivo: farm.tipo_cultivo, // Incluir cultivo en el análisis
+      Ubicacion: farm.ubicacion || 'No especificada',
+      Costo_Total: this.formatCurrency(this.totalCostForSelectedFarm()),
+      Costo_Por_Tarea: this.formatCurrency(this.costPerTarea()),
+    };
 
-    const parsed = parseFloat(cleanValue);
-    // Devuelve NaN si falla el parseo
-    return parsed; 
+    const systemPrompt = `Eres un experto analista financiero y agrónomo especializado en cultivo de ${farm.tipo_cultivo} en República Dominicana. Debes analizar los siguientes datos de costos de una finca. Proporciona un análisis conciso y profesional, estructurado en tres puntos principales, utilizando formato Markdown. No incluyas una introducción o conclusión, solo los puntos:
+1.  **Resumen Ejecutivo:** Evaluación rápida del costo total y costo por tarea en relación al cultivo de ${farm.tipo_cultivo}.
+2.  **Identificación de Patrones:** Señalar las actividades más costosas (las que más impactan el total).
+3.  **Recomendaciones de Optimización:** Ofrecer sugerencias prácticas para optimizar los gastos y mejorar la eficiencia, mencionando la finca por su nombre.`;
+
+    const userQuery = `Analiza los siguientes datos de costos de la finca.
+
+Detalles de la Finca:
+${JSON.stringify(farmDetails, null, 2)}
+
+Registro de Actividades y Costos:
+${JSON.stringify(dataForAnalysis, null, 2)}`;
+
+    const payload: GeminiPayload = {
+      contents: [{ parts: [{ text: userQuery }] }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+    };
+
+    const resultText = await this.callGeminiApi(payload);
+
+    // El resultado ya es Markdown, lo establecemos directamente. El computed property lo hará seguro.
+    this.analysisResult.set(resultText);
+    this.analysisLoading.set(false);
   }
 
+  /**
+   * Genera tips de cultivo y manejo para la finca seleccionada usando Gemini.
+   */
+  async generateCropTips(): Promise<void> {
+    const farm = this.selectedFarm();
+    if (!farm || this.cropTipsLoading()) return;
 
-  /** Obtiene el día de la semana en español a partir de una fecha YYYY-MM-DD */
-  getSpanishDayOfWeek(dateString: string): string {
-    if (!dateString) return '';
-    const days = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
-    // Ajuste: El constructor de Date necesita 'T00:00:00' para evitar problemas de zona horaria
-    const date = new Date(`${dateString}T00:00:00`); 
-    return days[date.getDay()];
-  }
-  
-  /** Obtiene la fecha de hoy en formato YYYY-MM-DD */
-  getTodayDate(): string {
-    return new Date().toISOString().split('T')[0];
+    this.cropTipsLoading.set(true);
+    this.cropTipsResult.set(null); 
+
+    const crop = farm.tipo_cultivo;
+    const activities = this.activitiesForSelectedFarm();
+
+    // Contexto de las últimas 5 actividades
+    const recentActivities = activities.slice(0, 5).map(act => (
+      `* Fecha: ${this.formatDate(act.fecha)}, Trabajo: ${act.trabajo_realizado}, Productos: ${act.productos || 'Ninguno'}`
+    )).join('\n');
+    
+    const activityContext = recentActivities 
+      ? `Las actividades recientes registradas en la finca son:\n${recentActivities}`
+      : 'No hay actividades recientes registradas. Asume un ciclo de cultivo en etapa temprana.';
+
+
+    // Se modifica el System Prompt para forzar la estructura con ##
+    const systemPrompt = `Eres un ingeniero agrónomo con experiencia en cultivos tropicales. Tu tarea es generar tips de manejo agrícola específicos. El resultado debe ser en formato Markdown, conciso y estructurado con tres secciones principales usando títulos de nivel 2 (##). No incluyas introducción ni conclusión.`;
+
+    // Se modifica el User Query para indicar los títulos exactos
+    const userQuery = `Dame tips de manejo para el cultivo de ${crop} en la finca "${farm.nombre_finca}". La finca tiene ${farm.tamano_tareas} tareas.
+
+Utiliza los siguientes títulos de nivel 2 para estructurar tu respuesta:
+## Riego
+## Fertilización (Abono)
+## Manejo de Plagas/Enfermedades
+
+Contexto de la finca:
+${activityContext}`;
+
+    const payload: GeminiPayload = {
+      contents: [{ parts: [{ text: userQuery }] }],
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+    };
+
+    const resultText = await this.callGeminiApi(payload);
+
+    // El resultado ya es Markdown, lo establecemos directamente. El computed property lo hará seguro.
+    this.cropTipsResult.set(resultText);
+    this.cropTipsLoading.set(false);
   }
 }
